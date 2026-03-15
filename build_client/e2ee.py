@@ -284,6 +284,10 @@ class E2EEHandler:
             content=echo_content,
         )
 
+        # Fetch the stored echo message to get its created_at timestamp.
+        recent = self.store.get_messages(channel_id, limit=1)
+        created_at = recent[-1].created_at if recent else None
+
         await self._send_frame(
             session, ws,
             payload={
@@ -293,8 +297,7 @@ class E2EEHandler:
                     "channel_id": channel_id,
                     "sender": "device",
                     "content": echo_content,
-                    "created_at": self.store.get_messages(channel_id, limit=1)[-1].created_at
-                    if self.store.get_messages(channel_id, limit=1) else None,
+                    "created_at": created_at,
                 },
             },
         )
