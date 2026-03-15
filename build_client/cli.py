@@ -16,6 +16,8 @@ import sys
 
 from build_client.auth import device_auth_flow
 from build_client.config import DEFAULT_CONFIG_PATH, load_config
+from build_client.e2ee import E2EEHandler
+from build_client.storage import MessageStore
 from build_client.ws import run_connection
 
 logging.basicConfig(
@@ -37,10 +39,16 @@ async def async_main(base_url: str, reset: bool = False) -> None:
     log.info("Device: %s (%s)", config.device_name, config.device_id)
     log.info("Server: %s", config.base_url)
 
+    # Initialize local message store and E2EE handler.
+    store = MessageStore()
+    handler = E2EEHandler(config, store)
+
     try:
-        await run_connection(config)
+        await run_connection(config, e2e_handler=handler.handle_message)
     except KeyboardInterrupt:
         pass
+    finally:
+        store.close()
 
     log.info("Disconnected.")
 

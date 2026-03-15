@@ -4,10 +4,14 @@ version = "0.1.0"
 description = "Build device client — authenticates with the Build server and maintains a persistent WebSocket connection."
 requires-python = ">=3.12"
 dependencies = [
+    "build-secure-transport",
     "cryptography>=44.0.0",
     "httpx>=0.28.0",
     "websockets>=15.0",
 ]
+
+[tool.uv.sources]
+build-secure-transport = { path = "../build-secure-transport/python" }
 
 [project.scripts]
 build-device = "build_client.cli:main"

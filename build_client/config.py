@@ -23,6 +23,9 @@ class DeviceConfig:
     private_key_b64: str
     public_key_b64: str
     base_url: str
+    # X25519 transport keypair for E2EE (generated on first connect)
+    transport_private_key_b64: str = ""
+    transport_public_key_b64: str = ""
 
 
 def generate_keypair() -> dict:
