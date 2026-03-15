@@ -146,7 +146,7 @@ class E2EEHandler:
         elif action == "message":
             await self._handle_chat_message(session, frame, ws)
         elif action == "mark_read":
-            self._mark_read(payload)
+            await self._mark_read(session, payload, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -261,6 +261,17 @@ class E2EEHandler:
             },
         )
 
+        # Mark as read (device has processed it).
+        self.store.mark_read(message_id)
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "read",
+                "message_ids": [message_id],
+                "channel_id": channel_id,
+            },
+        )
+
         # Echo the message back as a device response.
         echo_id = str(uuid.uuid4())
         echo_content = f"Echo: {content}"
@@ -288,11 +299,21 @@ class E2EEHandler:
             },
         )
 
-    def _mark_read(self, payload: dict[str, Any]) -> None:
-        """Mark messages as read."""
+    async def _mark_read(self, session: ActiveSession, payload: dict[str, Any], ws: Any) -> None:
+        """Mark messages as read and confirm to browser."""
         message_ids = payload.get("message_ids", [])
+        channel_id = payload.get("channel_id", "")
         for mid in message_ids:
             self.store.mark_read(mid)
+        if message_ids:
+            await self._send_frame(
+                session, ws,
+                payload={
+                    "action": "read",
+                    "message_ids": message_ids,
+                    "channel_id": channel_id,
+                },
+            )
 
     async def _send_frame(
         self,
