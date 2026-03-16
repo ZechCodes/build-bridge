@@ -5,8 +5,10 @@ description = "Build device client — authenticates with the Build server and m
 requires-python = ">=3.12"
 dependencies = [
     "build-secure-transport",
+    "claude-agent-sdk>=0.1.0",
     "cryptography>=44.0.0",
     "httpx>=0.28.0",
+    "mcp>=1.6.0",
     "websockets>=15.0",
 ]
 
@@ -15,6 +17,7 @@ build-secure-transport = { path = "../build-secure-transport/python" }
 
 [project.scripts]
 build-device = "build_client.cli:main"
+build-agent = "build_client.build_agent:main"
 
 [dependency-groups]
 dev = [

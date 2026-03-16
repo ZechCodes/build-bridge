@@ -1,4 +1,4 @@
-"""Device-side E2EE handler — session management, decryption, and echo chat."""
+"""Device-side E2EE handler — session management, decryption, and agent relay."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from build_secure_transport import (
     build_session_accept,
@@ -16,7 +16,12 @@ from build_secure_transport import (
 )
 
 from build_client.config import DeviceConfig
+from build_client.harness_registry import detect_installed, get_harness, serialize_harnesses
 from build_client.storage import MessageStore
+
+if TYPE_CHECKING:
+    from build_client.agent_server import AgentServer
+    from build_client.agent_spawner import AgentSpawner
 
 log = logging.getLogger(__name__)
 
@@ -32,16 +37,53 @@ class E2EEHandler:
     """Handles E2EE protocol on the device side.
 
     Manages sessions, decrypts incoming envelopes, stores messages,
-    and implements echo-chat for MVP.
+    and relays chat messages to/from connected agents.
     """
 
     def __init__(self, config: DeviceConfig, store: MessageStore) -> None:
         self.config = config
         self.store = store
         self._sessions: dict[str, ActiveSession] = {}
+        self._relay_ws: Any = None  # Current relay WS connection
+        self._agent_server: AgentServer | None = None
+        self._agent_spawner: AgentSpawner | None = None
+
+    def set_agent_server(self, server: AgentServer) -> None:
+        """Register the agent server for forwarding chat messages."""
+        self._agent_server = server
+
+    def set_agent_spawner(self, spawner: AgentSpawner) -> None:
+        """Register the agent spawner for starting/stopping agents."""
+        self._agent_spawner = spawner
+
+    async def broadcast_to_sessions(
+        self,
+        channel_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Broadcast an E2EE-encrypted payload to ALL active browser sessions.
+
+        Called by AgentServer when agent events need to reach the browser.
+        The payload includes channel_id so the browser can filter.
+        """
+        if not self._relay_ws:
+            log.debug("No relay WS connection — skipping broadcast")
+            return
+
+        for session in list(self._sessions.values()):
+            try:
+                await self._send_frame(session, self._relay_ws, payload=payload)
+            except Exception as exc:
+                log.error(
+                    "Failed to broadcast to session %s: %s",
+                    session.session_id[:12], exc,
+                )
 
     async def handle_message(self, msg: dict[str, Any], ws: Any) -> None:
         """Dispatch incoming WS messages from the server."""
+        # Track the relay WS for broadcasting.
+        self._relay_ws = ws
+
         msg_type = msg.get("type")
 
         if msg_type == "session_init":
@@ -147,6 +189,16 @@ class E2EEHandler:
             await self._handle_chat_message(session, frame, ws)
         elif action == "mark_read":
             await self._mark_read(session, payload, ws)
+        elif action == "list_harnesses":
+            await self._send_harness_list(session, ws)
+        elif action == "start_agent":
+            await self._start_agent(session, payload, ws)
+        elif action == "stop_agent":
+            await self._stop_agent(session, payload, ws)
+        elif action == "restart_agent":
+            await self._restart_agent(session, payload, ws)
+        elif action == "list_workers":
+            await self._send_worker_list(session, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -170,7 +222,10 @@ class E2EEHandler:
         payload: dict[str, Any],
         ws: Any,
     ) -> None:
-        """Create a new channel and confirm to browser."""
+        """Create a new channel and confirm to browser.
+
+        If harness config is provided, auto-spawn an agent on the new channel.
+        """
         name = payload.get("name", "").strip()
         if not name:
             await self._send_frame(
@@ -183,17 +238,45 @@ class E2EEHandler:
         channel = self.store.create_channel(channel_id, name)
         log.info("Created channel: %s (%s)", name, channel_id[:8])
 
-        await self._send_frame(
-            session, ws,
-            payload={
-                "action": "channel_created",
-                "channel": {
-                    "id": channel.id,
-                    "name": channel.name,
-                    "created_at": channel.created_at,
-                },
+        response: dict[str, Any] = {
+            "action": "channel_created",
+            "channel": {
+                "id": channel.id,
+                "name": channel.name,
+                "created_at": channel.created_at,
             },
-        )
+        }
+
+        # Auto-spawn agent if harness config provided.
+        harness = payload.get("harness", "")
+        if harness and self._agent_spawner:
+            model = payload.get("model", "")
+            system_prompt = payload.get("system_prompt", "")
+            working_directory = payload.get("working_directory", "")
+
+            harness_info = get_harness(harness)
+            if harness_info:
+                if not model:
+                    model = harness_info.default_model
+                try:
+                    worker = await self._agent_spawner.spawn(
+                        channel_id=channel_id,
+                        harness=harness,
+                        model=model,
+                        system_prompt=system_prompt,
+                        working_directory=working_directory,
+                    )
+                    response["agent"] = {
+                        "agent_id": worker.agent_id,
+                        "harness": harness,
+                        "model": model,
+                        "pid": worker.pid,
+                    }
+                except Exception as exc:
+                    log.error("Auto-spawn failed for channel %s: %s", channel_id[:8], exc)
+                    response["agent_error"] = str(exc)
+
+        await self._send_frame(session, ws, payload=response)
 
     async def _send_messages(
         self,
@@ -233,7 +316,7 @@ class E2EEHandler:
         frame: dict[str, Any],
         ws: Any,
     ) -> None:
-        """Handle an incoming chat message — store it and echo back."""
+        """Handle an incoming chat message — forward to agent or echo."""
         payload = frame.get("payload") or {}
         message_id = frame.get("message_id")
         channel_id = payload.get("channel_id", "")
@@ -272,7 +355,16 @@ class E2EEHandler:
             },
         )
 
-        # Echo the message back as a device response.
+        # Try to forward to a connected agent.
+        if self._agent_server and self._agent_server.is_channel_active(channel_id):
+            sent = await self._agent_server.send_chat_message(
+                channel_id, content, msg_id=message_id,
+            )
+            if sent:
+                log.info("Forwarded chat message to agent on channel %s", channel_id[:8])
+                return
+
+        # Fallback: echo the message back as a device response.
         echo_id = str(uuid.uuid4())
         echo_content = f"Echo: {content}"
 
@@ -284,7 +376,6 @@ class E2EEHandler:
             content=echo_content,
         )
 
-        # Fetch the stored echo message to get its created_at timestamp.
         recent = self.store.get_messages(channel_id, limit=1)
         created_at = recent[-1].created_at if recent else None
 
@@ -317,6 +408,184 @@ class E2EEHandler:
                     "channel_id": channel_id,
                 },
             )
+
+    # ------------------------------------------------------------------
+    # Harness & Agent management actions
+    # ------------------------------------------------------------------
+
+    async def _send_harness_list(self, session: ActiveSession, ws: Any) -> None:
+        """Send list of detected harnesses to the browser."""
+        harnesses = detect_installed()
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "harness_list",
+                "harnesses": serialize_harnesses(harnesses),
+            },
+        )
+
+    async def _start_agent(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Start an agent on a channel."""
+        if not self._agent_spawner:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": "agent spawner not available"},
+            )
+            return
+
+        channel_id = payload.get("channel_id", "")
+        harness = payload.get("harness", "")
+        model = payload.get("model", "")
+        system_prompt = payload.get("system_prompt", "")
+        working_directory = payload.get("working_directory", "")
+
+        if not channel_id or not harness:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": "channel_id and harness required"},
+            )
+            return
+
+        # Validate harness exists.
+        harness_info = get_harness(harness)
+        if not harness_info:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": f"unknown harness: {harness}"},
+            )
+            return
+
+        # Default to harness default model if none specified.
+        if not model:
+            model = harness_info.default_model
+
+        try:
+            worker = await self._agent_spawner.spawn(
+                channel_id=channel_id,
+                harness=harness,
+                model=model,
+                system_prompt=system_prompt,
+                working_directory=working_directory,
+            )
+            await self._send_frame(
+                session, ws,
+                payload={
+                    "action": "agent_started",
+                    "channel_id": channel_id,
+                    "agent_id": worker.agent_id,
+                    "harness": harness,
+                    "model": model,
+                    "pid": worker.pid,
+                },
+            )
+        except Exception as exc:
+            log.error("Failed to start agent on channel %s: %s", channel_id[:8], exc)
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": f"failed to start agent: {exc}"},
+            )
+
+    async def _stop_agent(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Stop the agent on a channel."""
+        if not self._agent_spawner:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": "agent spawner not available"},
+            )
+            return
+
+        channel_id = payload.get("channel_id", "")
+        if not channel_id:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": "channel_id required"},
+            )
+            return
+
+        stopped = await self._agent_spawner.stop(channel_id)
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "agent_stopped",
+                "channel_id": channel_id,
+                "was_running": stopped,
+            },
+        )
+
+    async def _restart_agent(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Restart the agent on a channel."""
+        if not self._agent_spawner:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": "agent spawner not available"},
+            )
+            return
+
+        channel_id = payload.get("channel_id", "")
+        if not channel_id:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": "channel_id required"},
+            )
+            return
+
+        try:
+            worker = await self._agent_spawner.restart(channel_id)
+            if not worker:
+                await self._send_frame(
+                    session, ws,
+                    payload={"action": "error", "error": f"no agent config found for channel {channel_id[:8]}"},
+                )
+                return
+
+            await self._send_frame(
+                session, ws,
+                payload={
+                    "action": "agent_restarted",
+                    "channel_id": channel_id,
+                    "agent_id": worker.agent_id,
+                    "pid": worker.pid,
+                },
+            )
+        except Exception as exc:
+            log.error("Failed to restart agent on channel %s: %s", channel_id[:8], exc)
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": f"failed to restart agent: {exc}"},
+            )
+
+    async def _send_worker_list(self, session: ActiveSession, ws: Any) -> None:
+        """Send list of running agent workers to the browser."""
+        if not self._agent_spawner:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "worker_list", "workers": []},
+            )
+            return
+
+        workers = self._agent_spawner.list_workers()
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "worker_list",
+                "workers": workers,
+            },
+        )
 
     async def _send_frame(
         self,
