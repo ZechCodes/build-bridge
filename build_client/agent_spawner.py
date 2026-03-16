@@ -130,13 +130,18 @@ class AgentSpawner:
             channel_id[:8], harness, model, agent_id[:8],
         )
 
+        # Resolve working directory (expand ~ and env vars).
+        cwd = None
+        if working_directory:
+            cwd = os.path.expanduser(os.path.expandvars(working_directory))
+
         # Spawn the process.
         process = await asyncio.create_subprocess_exec(
             *cmd,
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=working_directory or None,
+            cwd=cwd,
         )
 
         worker = WorkerInfo(
