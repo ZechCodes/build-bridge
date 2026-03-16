@@ -125,6 +125,13 @@ class AgentSpawner:
         env["BUILD_AGENT_PORT"] = str(self._agent_port)
         env["BUILD_AGENT_HOST"] = self._agent_host
 
+        # Ensure build_client is importable from any cwd by adding the
+        # project root to PYTHONPATH.  sys.executable lives in the venv
+        # but the package may not be pip-installed (uv run sets it up).
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        existing_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{project_root}:{existing_pp}" if existing_pp else project_root
+
         log.info(
             "Spawning agent for channel %s (harness=%s, model=%s, agent_id=%s)",
             channel_id[:8], harness, model, agent_id[:8],

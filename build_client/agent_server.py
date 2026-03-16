@@ -317,14 +317,20 @@ class AgentServer:
             self.store.update_channel_status(channel.id, "active")
             log.info("Agent %s reconnected to channel %s", agent_id[:8], channel.id[:8])
         else:
-            channel_id = f"ch_{uuid.uuid4().hex[:8]}"
-            channel = self.store.create_channel(
-                channel_id=channel_id,
-                agent_id=agent_id,
-                harness=harness,
-                model=model,
-            )
-            log.info("Created channel %s for agent %s", channel_id, agent_id[:8])
+            # Check if the spawner pre-created a channel for this agent_id.
+            channel = self.store.get_channel_by_agent_id(agent_id)
+            if channel:
+                self.store.update_channel_status(channel.id, "active")
+                log.info("Agent %s connected to pre-created channel %s", agent_id[:8], channel.id[:8])
+            else:
+                channel_id = f"ch_{uuid.uuid4().hex[:8]}"
+                channel = self.store.create_channel(
+                    channel_id=channel_id,
+                    agent_id=agent_id,
+                    harness=harness,
+                    model=model,
+                )
+                log.info("Created channel %s for agent %s", channel_id, agent_id[:8])
 
         # Build history for agent.configured.
         chat_history = [
