@@ -36,9 +36,12 @@ class HarnessInfo:
 # ---------------------------------------------------------------------------
 
 _CLAUDE_CODE_MODELS = [
-    ModelInfo("claude-sonnet-4-20250514", "Claude Sonnet 4", "anthropic"),
-    ModelInfo("claude-opus-4-20250514", "Claude Opus 4", "anthropic"),
-    ModelInfo("claude-haiku-3-5-20241022", "Claude Haiku 3.5", "anthropic"),
+    ModelInfo("claude-sonnet-4-6", "Claude Sonnet 4.6", "anthropic"),
+    ModelInfo("claude-opus-4-6", "Claude Opus 4.6", "anthropic"),
+    ModelInfo("claude-haiku-4-5", "Claude Haiku 4.5", "anthropic"),
+    # Legacy models still available.
+    ModelInfo("claude-sonnet-4-5", "Claude Sonnet 4.5", "anthropic"),
+    ModelInfo("claude-opus-4-5", "Claude Opus 4.5", "anthropic"),
 ]
 
 _CODEX_MODELS = [
@@ -53,7 +56,7 @@ KNOWN_HARNESSES: list[HarnessInfo] = [
         name="Claude Code",
         description="Anthropic's agentic coding tool with planning, tool use, and MCP support.",
         models=_CLAUDE_CODE_MODELS,
-        default_model="claude-sonnet-4-20250514",
+        default_model="claude-sonnet-4-6",
     ),
     HarnessInfo(
         id="codex",
