@@ -399,7 +399,8 @@ class E2EEHandler:
             content=content,
         )
 
-        # Send delivered status.
+        # Send delivered status (message reached device, but agent hasn't read it yet).
+        self.store.mark_delivered(message_id)
         await self._send_frame(
             session, ws,
             payload={
@@ -409,16 +410,9 @@ class E2EEHandler:
             },
         )
 
-        # Mark as read (device has processed it).
-        self.store.mark_read(message_id)
-        await self._send_frame(
-            session, ws,
-            payload={
-                "action": "read",
-                "message_ids": [message_id],
-                "channel_id": channel_id,
-            },
-        )
+        # NOTE: We do NOT mark as read here. The message is marked read when
+        # the agent calls read_unread via the Chat MCP tool. See
+        # _on_agent_read_messages() for the read notification flow.
 
         # Try to forward to a connected agent.
         if not self._agent_server:
@@ -452,6 +446,16 @@ class E2EEHandler:
         )
         if sent:
             log.info("Forwarded chat message to agent on channel %s", channel_id[:8])
+            # Mark as read now that the agent has received the message.
+            self.store.mark_read(message_id)
+            await self._send_frame(
+                session, ws,
+                payload={
+                    "action": "read",
+                    "message_ids": [message_id],
+                    "channel_id": channel_id,
+                },
+            )
         else:
             log.error(
                 "Failed to send chat message to agent on channel %s "

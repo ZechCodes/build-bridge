@@ -72,6 +72,22 @@ async def async_main(base_url: str, reset: bool = False, agent_port: int = DEFAU
         await agent_server.start()
         log.info("Agent server ready on port %s", agent_port)
 
+        # Re-spawn agents for channels that were active before restart.
+        active_channels = agent_store.list_active_channels()
+        if active_channels:
+            log.info("Re-spawning agents for %d active channel(s)", len(active_channels))
+            for ch in active_channels:
+                try:
+                    await agent_spawner.spawn(
+                        channel_id=ch.id,
+                        harness=ch.harness,
+                        model=ch.model,
+                        system_prompt=ch.system_prompt,
+                        working_directory=ch.working_directory,
+                    )
+                except Exception as exc:
+                    log.error("Failed to re-spawn agent on channel %s: %s", ch.id[:8], exc)
+
         # Run the relay connection (blocking reconnect loop).
         await run_connection(config, e2e_handler=handler.handle_message)
     except KeyboardInterrupt:
