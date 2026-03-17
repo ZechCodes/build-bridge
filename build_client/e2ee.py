@@ -379,6 +379,13 @@ class E2EEHandler:
             },
         )
 
+    # Max activity entries to send in a single activity_history response.
+    # The relay enforces a 256 KB envelope limit; large histories (hundreds of
+    # tool uses with big inputs) easily exceed that.  We keep the last N
+    # *tool_use* entries plus their matching tool_result entries so the console
+    # shows recent activity without blowing the size budget.
+    _MAX_ACTIVITY_TOOL_USES = 150
+
     async def _send_activity(
         self,
         session: ActiveSession,
@@ -403,6 +410,12 @@ class E2EEHandler:
                             data = _json.loads(entry.data)
                         except (ValueError, TypeError):
                             data = {}
+                        # Trim large tool inputs to keep envelope size down.
+                        if entry.type == "tool_use" and isinstance(data.get("input"), dict):
+                            data["input"] = {
+                                k: (v[:200] + "…" if isinstance(v, str) and len(v) > 200 else v)
+                                for k, v in data["input"].items()
+                            }
                         entries.append({
                             "type": entry.type,
                             "data": data,
@@ -410,6 +423,11 @@ class E2EEHandler:
                         })
             except Exception as exc:
                 log.error("Failed to fetch activity history: %s", exc)
+
+        # Trim to the most recent N tool_use entries (plus their results) so
+        # the encrypted envelope stays under the relay's 256 KB size limit.
+        if entries:
+            entries = self._trim_activity_entries(entries)
 
         log.info(
             "Sending %d activity entries for channel %s",
@@ -424,6 +442,38 @@ class E2EEHandler:
                 "entries": entries,
             },
         )
+
+    @classmethod
+    def _trim_activity_entries(
+        cls, entries: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Keep the last N tool_use entries and their matching tool_result entries."""
+        # Collect tool_use entries and find the cutoff point.
+        tool_use_indices: list[int] = []
+        for i, e in enumerate(entries):
+            if e["type"] == "tool_use":
+                tool_use_indices.append(i)
+
+        if len(tool_use_indices) <= cls._MAX_ACTIVITY_TOOL_USES:
+            return entries
+
+        # Keep entries from the Nth-from-last tool_use onward.
+        cutoff_idx = tool_use_indices[-cls._MAX_ACTIVITY_TOOL_USES]
+        kept = entries[cutoff_idx:]
+
+        # Also keep any tool_result entries before the cutoff that reference
+        # a kept tool_use (shouldn't normally happen, but be safe).
+        kept_ids = {
+            e["data"].get("id") for e in kept if e["type"] == "tool_use" and "data" in e
+        }
+        for e in entries[:cutoff_idx]:
+            if (
+                e["type"] == "tool_result"
+                and e.get("data", {}).get("tool_use_id") in kept_ids
+            ):
+                kept.insert(0, e)
+
+        return kept
 
     async def _handle_chat_message(
         self,

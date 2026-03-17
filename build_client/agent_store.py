@@ -329,8 +329,8 @@ class AgentStore:
         tool_use_id: str,
         content: Any,
         is_error: bool,
-    ) -> None:
-        """Update a tool use record with its result."""
+    ) -> str:
+        """Update a tool use record with its result. Returns completed_at."""
         now = now_iso()
         output_json = json.dumps(content) if not isinstance(content, str) else content
         self.db.execute(
@@ -338,6 +338,7 @@ class AgentStore:
             (output_json, is_error, now, tool_use_id),
         )
         self.db.commit()
+        return now
 
     def get_tool_uses(self, channel_id: str) -> list[ToolUseRecord]:
         """Get all tool uses for a channel, chronological order."""

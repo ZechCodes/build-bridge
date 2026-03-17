@@ -528,7 +528,7 @@ class AgentServer:
         tool_input = payload.get("input", {})
 
         # Store tool use.
-        self.store.store_tool_use(tool_use_id, agent.channel_id, name, tool_input)
+        record = self.store.store_tool_use(tool_use_id, agent.channel_id, name, tool_input)
 
         # Store as activity entry.
         self.store.store_activity(
@@ -545,6 +545,7 @@ class AgentServer:
                 "tool_use_id": tool_use_id,
                 "name": name,
                 "input": tool_input,
+                "created_at": record.created_at,
             },
         })
 
@@ -558,7 +559,7 @@ class AgentServer:
         is_error = payload.get("is_error", False)
 
         # Store tool result.
-        self.store.store_tool_result(tool_use_id, content, is_error)
+        completed_at = self.store.store_tool_result(tool_use_id, content, is_error)
 
         # Store as activity entry.
         self.store.store_activity(
@@ -575,6 +576,7 @@ class AgentServer:
                 "tool_use_id": tool_use_id,
                 "content": content,
                 "is_error": is_error,
+                "completed_at": completed_at,
             },
         })
 
