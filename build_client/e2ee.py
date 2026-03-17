@@ -195,6 +195,8 @@ class E2EEHandler:
             await self._create_channel(session, payload, ws)
         elif action == "get_messages":
             await self._send_messages(session, payload, ws)
+        elif action == "get_activity":
+            await self._send_activity(session, payload, ws)
         elif action == "message":
             await self._handle_chat_message(session, frame, ws)
         elif action == "mark_read":
@@ -374,6 +376,52 @@ class E2EEHandler:
                 "action": "messages",
                 "channel_id": channel_id,
                 "messages": combined,
+            },
+        )
+
+    async def _send_activity(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Send tool use history for a channel.
+
+        Returns tool_use and tool_result entries from the AgentStore activity
+        log so the browser can populate the console on page load / reconnect.
+        """
+        channel_id = payload.get("channel_id", "")
+
+        entries: list[dict[str, Any]] = []
+        if self._agent_server:
+            try:
+                import json as _json
+                activity = self._agent_server.store.get_activity_history(channel_id)
+                for entry in activity:
+                    if entry.type in ("tool_use", "tool_result"):
+                        try:
+                            data = _json.loads(entry.data)
+                        except (ValueError, TypeError):
+                            data = {}
+                        entries.append({
+                            "type": entry.type,
+                            "data": data,
+                            "created_at": entry.created_at,
+                        })
+            except Exception as exc:
+                log.error("Failed to fetch activity history: %s", exc)
+
+        log.info(
+            "Sending %d activity entries for channel %s",
+            len(entries), channel_id[:8],
+        )
+
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "activity_history",
+                "channel_id": channel_id,
+                "entries": entries,
             },
         )
 
