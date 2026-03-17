@@ -254,21 +254,27 @@ class AgentSpawner:
         try:
             returncode = await worker.process.wait()
 
-            # Read any stderr output.
+            # Read any stdout/stderr output.
+            stdout = b""
             stderr = b""
+            if worker.process.stdout:
+                stdout = await worker.process.stdout.read()
             if worker.process.stderr:
                 stderr = await worker.process.stderr.read()
 
+            combined = (stdout + b"\n" + stderr).decode(errors="replace").strip()
+
             if returncode == 0:
                 log.info(
-                    "Agent pid=%s on channel %s exited normally",
+                    "Agent pid=%s on channel %s exited normally. Output: %s",
                     worker.pid, worker.channel_id[:8],
+                    combined[-1000:] if combined else "(none)",
                 )
             else:
                 log.warning(
                     "Agent pid=%s on channel %s exited with code %s: %s",
                     worker.pid, worker.channel_id[:8], returncode,
-                    stderr.decode(errors="replace")[:500],
+                    combined[-1000:] if combined else "(none)",
                 )
 
             # Update channel status.
