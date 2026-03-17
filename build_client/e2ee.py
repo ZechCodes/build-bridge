@@ -360,6 +360,11 @@ class E2EEHandler:
         if len(combined) > limit:
             combined = combined[-limit:]
 
+        log.info(
+            "Sending %d messages for channel %s (e2ee=%d, agent=%d)",
+            len(combined), channel_id[:8], len(e2ee_msgs), len(agent_msgs),
+        )
+
         await self._send_frame(
             session, ws,
             payload={
