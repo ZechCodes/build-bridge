@@ -254,6 +254,13 @@ class E2EEHandler:
             system_prompt = payload.get("system_prompt", "")
             working_directory = payload.get("working_directory", "")
 
+            log.info(
+                "create_channel payload: harness=%r, model=%r, "
+                "system_prompt=%r, working_directory=%r, all_keys=%s",
+                harness, model, system_prompt, working_directory,
+                list(payload.keys()),
+            )
+
             harness_info = get_harness(harness)
             if harness_info:
                 if not model:
