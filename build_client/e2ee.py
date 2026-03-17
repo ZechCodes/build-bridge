@@ -67,10 +67,20 @@ class E2EEHandler:
         The payload includes channel_id so the browser can filter.
         """
         if not self._relay_ws:
-            log.debug("No relay WS connection — skipping broadcast")
+            log.warning("No relay WS connection — skipping broadcast for %s", payload.get("event_type", "?"))
             return
 
-        for session in list(self._sessions.values()):
+        sessions = list(self._sessions.values())
+        if not sessions:
+            log.warning("No active sessions — skipping broadcast for %s", payload.get("event_type", "?"))
+            return
+
+        log.info(
+            "Broadcasting %s to %d session(s) on channel %s",
+            payload.get("event_type", "?"), len(sessions), channel_id[:8],
+        )
+
+        for session in sessions:
             try:
                 await self._send_frame(session, self._relay_ws, payload=payload)
             except Exception as exc:
