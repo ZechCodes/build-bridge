@@ -172,6 +172,45 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
     return hook
 
 
+_MAX_TOOL_RESULT_CHARS = 16_000  # Keep results under ~16 KB to stay within relay limits.
+
+
+def _extract_tool_content(tool_response) -> tuple[str, bool]:
+    """Extract text content and error flag from a tool_response value.
+
+    tool_response can be a string, a list of content blocks
+    (``[{"type": "text", "text": "..."}]``), or ``None``.
+    """
+    if tool_response is None:
+        return "", False
+
+    is_error = False
+    if isinstance(tool_response, str):
+        text = tool_response
+    elif isinstance(tool_response, list):
+        parts: list[str] = []
+        for block in tool_response:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                if block.get("is_error"):
+                    is_error = True
+            elif isinstance(block, str):
+                parts.append(block)
+        text = "\n".join(parts)
+    elif isinstance(tool_response, dict):
+        text = tool_response.get("text", "") or tool_response.get("content", "")
+        is_error = bool(tool_response.get("is_error"))
+    else:
+        text = str(tool_response)
+
+    # Truncate oversized results so they don't blow the relay envelope limit.
+    if len(text) > _MAX_TOOL_RESULT_CHARS:
+        text = text[:_MAX_TOOL_RESULT_CHARS] + "\n…truncated"
+
+    return text, is_error
+
+
 def make_post_tool_hook(wrapper: AgentWrapper):
     """PostToolUse hook — emit tool.result to device client."""
 
@@ -182,13 +221,14 @@ def make_post_tool_hook(wrapper: AgentWrapper):
         if tool_name.startswith("mcp__build_chat__"):
             return {}
 
-        # The SDK doesn't directly expose the tool result in PostToolUse,
-        # so we emit a completion signal. The full result content isn't
-        # available here — emit a descriptive result instead.
+        content, is_error = _extract_tool_content(
+            input_data.get("tool_response"),
+        )
+
         await wrapper.emit_tool_result(
             tool_use_id or f"tu_{id(input_data)}",
-            _describe_tool(tool_name, input_data.get("tool_input", {})) + " — done",
-            is_error=False,
+            content or (_describe_tool(tool_name, input_data.get("tool_input", {})) + " — done"),
+            is_error=is_error,
             tool_name=tool_name,
         )
 
