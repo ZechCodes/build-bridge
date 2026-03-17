@@ -316,29 +316,32 @@ class E2EEHandler:
         # Agent chat messages (user + assistant from AgentStore).
         agent_msgs: list[dict[str, Any]] = []
         if self._agent_server:
-            from datetime import datetime, timezone
-            chat_history = self._agent_server.store.get_chat_history(channel_id)
-            # Collect IDs from E2EE messages to avoid duplicates (user messages
-            # appear in both stores).
-            e2ee_ids = {m.id for m in e2ee_msgs}
-            for cm in chat_history:
-                if cm.id in e2ee_ids:
-                    continue  # Already in E2EE messages.
-                # Parse ISO created_at to float timestamp for consistent sorting.
-                try:
-                    dt = datetime.fromisoformat(cm.created_at)
-                    ts = dt.timestamp()
-                except (ValueError, TypeError):
-                    ts = 0.0
-                agent_msgs.append({
-                    "id": cm.id,
-                    "channel_id": cm.channel_id,
-                    "sender": "device" if cm.role == "assistant" else "client",
-                    "content": cm.content,
-                    "created_at": ts,
-                    "delivered_at": ts,
-                    "read_at": ts,
-                })
+            try:
+                from datetime import datetime, timezone
+                chat_history = self._agent_server.store.get_chat_history(channel_id)
+                # Collect IDs from E2EE messages to avoid duplicates (user messages
+                # appear in both stores).
+                e2ee_ids = {m.id for m in e2ee_msgs}
+                for cm in chat_history:
+                    if cm.id in e2ee_ids:
+                        continue  # Already in E2EE messages.
+                    # Parse ISO created_at to float timestamp for consistent sorting.
+                    try:
+                        dt = datetime.fromisoformat(cm.created_at)
+                        ts = dt.timestamp()
+                    except (ValueError, TypeError):
+                        ts = 0.0
+                    agent_msgs.append({
+                        "id": cm.id,
+                        "channel_id": cm.channel_id,
+                        "sender": "device" if cm.role == "assistant" else "client",
+                        "content": cm.content,
+                        "created_at": ts,
+                        "delivered_at": ts,
+                        "read_at": ts,
+                    })
+            except Exception as exc:
+                log.error("Failed to merge agent chat messages: %s", exc)
 
         # Merge and sort chronologically.
         combined = [
