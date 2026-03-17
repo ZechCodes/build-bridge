@@ -301,29 +301,71 @@ class E2EEHandler:
         payload: dict[str, Any],
         ws: Any,
     ) -> None:
-        """Send message history for a channel."""
+        """Send message history for a channel.
+
+        Merges E2EE messages (user + device error messages) with agent chat
+        messages (from the AgentStore) into a single chronological list.
+        """
         channel_id = payload.get("channel_id", "")
         limit = payload.get("limit", 50)
         before = payload.get("before")
 
-        messages = self.store.get_messages(channel_id, limit=limit, before=before)
+        # E2EE messages (user messages, device error messages).
+        e2ee_msgs = self.store.get_messages(channel_id, limit=limit, before=before)
+
+        # Agent chat messages (user + assistant from AgentStore).
+        agent_msgs: list[dict[str, Any]] = []
+        if self._agent_server:
+            from datetime import datetime, timezone
+            chat_history = self._agent_server.store.get_chat_history(channel_id)
+            # Collect IDs from E2EE messages to avoid duplicates (user messages
+            # appear in both stores).
+            e2ee_ids = {m.id for m in e2ee_msgs}
+            for cm in chat_history:
+                if cm.id in e2ee_ids:
+                    continue  # Already in E2EE messages.
+                # Parse ISO created_at to float timestamp for consistent sorting.
+                try:
+                    dt = datetime.fromisoformat(cm.created_at)
+                    ts = dt.timestamp()
+                except (ValueError, TypeError):
+                    ts = 0.0
+                agent_msgs.append({
+                    "id": cm.id,
+                    "channel_id": cm.channel_id,
+                    "sender": "device" if cm.role == "assistant" else "client",
+                    "content": cm.content,
+                    "created_at": ts,
+                    "delivered_at": ts,
+                    "read_at": ts,
+                })
+
+        # Merge and sort chronologically.
+        combined = [
+            {
+                "id": m.id,
+                "channel_id": m.channel_id,
+                "sender": m.sender,
+                "content": m.content,
+                "created_at": m.created_at,
+                "delivered_at": m.delivered_at,
+                "read_at": m.read_at,
+            }
+            for m in e2ee_msgs
+        ] + agent_msgs
+
+        combined.sort(key=lambda m: m.get("created_at") or 0)
+
+        # Apply limit after merge.
+        if len(combined) > limit:
+            combined = combined[-limit:]
+
         await self._send_frame(
             session, ws,
             payload={
                 "action": "messages",
                 "channel_id": channel_id,
-                "messages": [
-                    {
-                        "id": m.id,
-                        "channel_id": m.channel_id,
-                        "sender": m.sender,
-                        "content": m.content,
-                        "created_at": m.created_at,
-                        "delivered_at": m.delivered_at,
-                        "read_at": m.read_at,
-                    }
-                    for m in messages
-                ],
+                "messages": combined,
             },
         )
 
