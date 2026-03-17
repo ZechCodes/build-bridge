@@ -125,6 +125,10 @@ class AgentSpawner:
         env["BUILD_AGENT_PORT"] = str(self._agent_port)
         env["BUILD_AGENT_HOST"] = self._agent_host
 
+        # Remove CLAUDECODE env var so the agent subprocess isn't rejected
+        # as a nested Claude Code session.
+        env.pop("CLAUDECODE", None)
+
         # Ensure build_client is importable from any cwd by adding the
         # project root to PYTHONPATH.  sys.executable lives in the venv
         # but the package may not be pip-installed (uv run sets it up).
