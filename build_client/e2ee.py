@@ -316,13 +316,14 @@ class E2EEHandler:
         frame: dict[str, Any],
         ws: Any,
     ) -> None:
-        """Handle an incoming chat message — forward to agent or echo."""
+        """Handle an incoming chat message — forward to agent."""
         payload = frame.get("payload") or {}
         message_id = frame.get("message_id")
         channel_id = payload.get("channel_id", "")
         content = payload.get("content", "")
 
         if not channel_id or not content:
+            log.warning("Chat message missing channel_id or content: channel_id=%r, content=%r", channel_id, bool(content))
             return
 
         # Store the incoming message from the client.
@@ -356,38 +357,75 @@ class E2EEHandler:
         )
 
         # Try to forward to a connected agent.
-        if self._agent_server and self._agent_server.is_channel_active(channel_id):
-            sent = await self._agent_server.send_chat_message(
-                channel_id, content, msg_id=message_id,
+        if not self._agent_server:
+            log.error(
+                "No agent server registered — cannot forward message on channel %s",
+                channel_id[:8],
             )
-            if sent:
-                log.info("Forwarded chat message to agent on channel %s", channel_id[:8])
-                return
+            await self._send_error_message(session, ws, channel_id, "No agent server available")
+            return
 
-        # Fallback: echo the message back as a device response.
-        echo_id = str(uuid.uuid4())
-        echo_content = f"Echo: {content}"
+        if not self._agent_server.is_channel_active(channel_id):
+            # Log detailed diagnostics.
+            known_channels = list(self._agent_server._channel_to_agent.keys())
+            spawner_workers = list(self._agent_spawner.workers.keys()) if self._agent_spawner else []
+            log.error(
+                "No active agent on channel %s. "
+                "Agent server active channels: %s. "
+                "Spawner tracked workers: %s",
+                channel_id[:8],
+                [c[:8] for c in known_channels],
+                [w[:8] for w in spawner_workers],
+            )
+            await self._send_error_message(
+                session, ws, channel_id,
+                "No agent connected on this channel. Try restarting the agent.",
+            )
+            return
 
+        sent = await self._agent_server.send_chat_message(
+            channel_id, content, msg_id=message_id,
+        )
+        if sent:
+            log.info("Forwarded chat message to agent on channel %s", channel_id[:8])
+        else:
+            log.error(
+                "Failed to send chat message to agent on channel %s "
+                "(agent lookup succeeded but send failed)",
+                channel_id[:8],
+            )
+            await self._send_error_message(
+                session, ws, channel_id,
+                "Failed to deliver message to agent. The agent may have disconnected.",
+            )
+
+    async def _send_error_message(
+        self,
+        session: ActiveSession,
+        ws: Any,
+        channel_id: str,
+        error_text: str,
+    ) -> None:
+        """Send an error as a device message to the browser."""
+        error_id = str(uuid.uuid4())
         self.store.store_message(
-            message_id=echo_id,
+            message_id=error_id,
             channel_id=channel_id,
             session_id=session.session_id,
             sender="device",
-            content=echo_content,
+            content=f"⚠ {error_text}",
         )
-
         recent = self.store.get_messages(channel_id, limit=1)
         created_at = recent[-1].created_at if recent else None
-
         await self._send_frame(
             session, ws,
             payload={
                 "action": "message",
                 "message": {
-                    "id": echo_id,
+                    "id": error_id,
                     "channel_id": channel_id,
                     "sender": "device",
-                    "content": echo_content,
+                    "content": f"⚠ {error_text}",
                     "created_at": created_at,
                 },
             },
