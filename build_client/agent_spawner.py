@@ -102,12 +102,9 @@ class AgentSpawner:
             )
         else:
             # Update existing channel with new agent_id.
-            self._store.db.execute(
-                "UPDATE agent_channels SET agent_id = ?, harness = ?, model = ?, "
-                "system_prompt = ?, status = 'active' WHERE id = ?",
-                (agent_id, harness, model, system_prompt, channel_id),
+            self._store.update_channel_agent(
+                channel_id, agent_id, harness, model, system_prompt,
             )
-            self._store.db.commit()
 
         # Build the command.
         cmd = [

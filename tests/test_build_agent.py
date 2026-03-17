@@ -111,7 +111,7 @@ class TestChatTools:
         read_tool = next(t for t in tools if t.name == "read_unread")
 
         # Queue a message and read it via the tool.
-        wrapper.chat_mcp.queue_message("Hello agent")
+        await wrapper.chat_mcp.queue_message("Hello agent")
         result = read_tool.handler  # The raw handler
         # Use handle_read_unread directly since we can't call SDK tools in tests.
         mcp_result = await wrapper.chat_mcp.handle_read_unread()

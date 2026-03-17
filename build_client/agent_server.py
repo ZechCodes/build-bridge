@@ -395,7 +395,6 @@ class AgentServer:
         ref = data.get("ref")
 
         # Direction check: only accept agent→client or bidirectional.
-        from build_client.agent_protocol import AGENT_TO_CLIENT, BIDIRECTIONAL
         if msg_type not in AGENT_TO_CLIENT and msg_type not in BIDIRECTIONAL:
             await self._send_error(
                 agent.ws, ERROR_PROTOCOL_VIOLATION,

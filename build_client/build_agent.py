@@ -48,18 +48,30 @@ log = logging.getLogger(__name__)
 # The SDK closes stdin after the first assistant message arrives, but hooks
 # need the control stream open for the entire query duration.
 # ---------------------------------------------------------------------------
-from claude_agent_sdk._internal import query as _sdk_query  # noqa: E402
+try:
+    from claude_agent_sdk._internal import query as _sdk_query  # noqa: E402
 
+    if not hasattr(_sdk_query.Query, "wait_for_result_and_end_input"):
+        raise AttributeError(
+            "SDK internals changed — 'Query.wait_for_result_and_end_input' not found. "
+            "The monkey-patch in build_agent.py needs to be updated for this SDK version."
+        )
 
-async def _patched_wait_for_result_and_end_input(self) -> None:
-    """No-op replacement — keep stdin open for hooks throughout the query."""
-    if self.sdk_mcp_servers or self.hooks:
-        log.debug("Keeping stdin open for hook callbacks (patched)")
-    else:
-        await self.transport.end_input()
+    async def _patched_wait_for_result_and_end_input(self) -> None:
+        """No-op replacement — keep stdin open for hooks throughout the query."""
+        if self.sdk_mcp_servers or self.hooks:
+            log.debug("Keeping stdin open for hook callbacks (patched)")
+        else:
+            await self.transport.end_input()
 
+    _sdk_query.Query.wait_for_result_and_end_input = _patched_wait_for_result_and_end_input
 
-_sdk_query.Query.wait_for_result_and_end_input = _patched_wait_for_result_and_end_input
+except (ImportError, AttributeError) as _patch_err:
+    log.warning(
+        "Failed to apply SDK stdin monkey-patch: %s. "
+        "Hooks may not work correctly if the SDK closes stdin early.",
+        _patch_err,
+    )
 
 # ---------------------------------------------------------------------------
 # Chat context prompt — instructs the agent to use Chat MCP tools
@@ -94,7 +106,8 @@ def make_chat_tools(wrapper: AgentWrapper) -> list:
         try:
             result = await wrapper.chat_mcp.handle_read_unread()
             return {"content": [{"type": "text", "text": json.dumps(result)}]}
-        except Exception as e:
+        except (ConnectionError, RuntimeError, OSError) as e:
+            log.warning("read_unread tool error: %s", e)
             return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
 
     @tool(
@@ -107,7 +120,8 @@ def make_chat_tools(wrapper: AgentWrapper) -> list:
         try:
             result = await wrapper.chat_mcp.handle_send(args["message"])
             return {"content": [{"type": "text", "text": json.dumps(result)}]}
-        except Exception as e:
+        except (ConnectionError, RuntimeError, OSError) as e:
+            log.warning("send tool error: %s", e)
             return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
 
     return [read_unread, send]
@@ -175,6 +189,7 @@ def make_post_tool_hook(wrapper: AgentWrapper):
             tool_use_id or f"tu_{id(input_data)}",
             _describe_tool(tool_name, input_data.get("tool_input", {})) + " — done",
             is_error=False,
+            tool_name=tool_name,
         )
 
         return {}
@@ -322,7 +337,6 @@ async def run_agent(
         # Outer loop: each iteration is a fresh agent context.
         while True:
             options = build_agent_options(wrapper)
-            reset_reason: str | None = None
 
             async with ClaudeSDKClient(options=options) as client:
                 # Build initial prompt.
@@ -344,16 +358,19 @@ async def run_agent(
                     await handle_response_message(message, wrapper)
 
                 # Message loop — wait for user messages and inject them.
+                exit_reason = "context_ended"
                 while True:
                     # Wait for a new user message (queued by wrapper.run() from chat.message).
                     has_msg = await wrapper.chat_mcp.wait_for_unread(timeout=5.0)
 
                     if cancel_event.is_set():
                         cancel_event.clear()
+                        exit_reason = "cancelled"
                         log.info("Cancel received, breaking inner loop")
                         break
 
                     if not wrapper.is_connected:
+                        exit_reason = "disconnected"
                         log.warning("Lost connection to device client")
                         break
 
@@ -362,15 +379,16 @@ async def run_agent(
                         # Only if the agent is between turns (not mid-work).
                         continue
 
-                    # Build the unread notification and inject it.
-                    notification = wrapper.chat_mcp.build_unread_notification()
+                    # Atomically check and build notification to avoid race
+                    # with concurrent handle_read_unread draining the queue.
+                    notification = await wrapper.chat_mcp.drain_unread_notification()
                     if notification:
                         await client.query(notification)
                         async for message in client.receive_response():
                             await handle_response_message(message, wrapper)
 
             # Client exited — log and decide whether to loop.
-            log.info("Agent context ended (%s)", reset_reason)
+            log.info("Agent context ended (%s)", exit_reason)
 
             if not wrapper.is_connected:
                 break
@@ -378,7 +396,10 @@ async def run_agent(
     except Exception as e:
         log.error("Agent error: %s", e, exc_info=True)
         try:
-            await wrapper.chat_mcp.handle_send(f"Agent error: {e}")
+            await wrapper.chat_mcp.handle_send(
+                "Something went wrong. The agent encountered an internal error "
+                "and may need to restart."
+            )
         except Exception:
             pass
     finally:

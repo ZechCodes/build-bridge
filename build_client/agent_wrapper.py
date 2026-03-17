@@ -152,6 +152,14 @@ class AgentWrapper:
     def is_connected(self) -> bool:
         return self._connected.is_set()
 
+    @property
+    def shutdown_requested(self) -> bool:
+        return self._shutdown_requested.is_set()
+
+    def mark_reconnect(self) -> None:
+        """Mark subsequent connections as reconnections."""
+        self._reconnect = True
+
     # -----------------------------------------------------------------
     # Connection
     # -----------------------------------------------------------------
@@ -277,7 +285,7 @@ class AgentWrapper:
         if msg_type == CHAT_MESSAGE:
             # Queue user message for Chat MCP read_unread.
             content = payload.get("content", "")
-            self.chat_mcp.queue_message(content)
+            await self.chat_mcp.queue_message(content)
             log.debug("Queued user message (%d unread)", self.chat_mcp.unread_count)
 
         elif msg_type == CHAT_CANCEL:
@@ -373,14 +381,15 @@ class AgentWrapper:
         tool_use_id: str,
         content: str | list[dict[str, Any]],
         is_error: bool = False,
-        tool_name: str | None = None,
+        *,
+        tool_name: str,
     ) -> None:
         """Emit tool.result — tool execution completed.
 
         Chat MCP tools are automatically filtered (§8.4).
-        Pass tool_name to enable filtering; if omitted, always emits.
+        tool_name is required to ensure filtering is never bypassed.
         """
-        if tool_name and tool_name in CHAT_MCP_TOOLS:
+        if tool_name in CHAT_MCP_TOOLS:
             return  # Filtered per §8.4.
 
         envelope = make_envelope(TOOL_RESULT, {
@@ -450,7 +459,7 @@ async def run_agent(
             backoff_ms = INITIAL_BACKOFF_MS  # Reset on success.
             await wrapper.run()
 
-            if wrapper._shutdown_requested.is_set():
+            if wrapper.shutdown_requested:
                 log.info("Shutdown requested — exiting")
                 return
 
@@ -469,4 +478,4 @@ async def run_agent(
         await asyncio.sleep(delay_s)
 
         backoff_ms = min(backoff_ms * BACKOFF_FACTOR, MAX_BACKOFF_MS)
-        wrapper._reconnect = True  # Subsequent connects are reconnections.
+        wrapper.mark_reconnect()  # Subsequent connects are reconnections.

@@ -10,9 +10,9 @@ from build_client.chat_mcp import ChatMCP
 
 
 class TestMessageQueue:
-    def test_queue_message(self):
+    async def test_queue_message(self):
         chat = ChatMCP()
-        chat.queue_message("Hello")
+        await chat.queue_message("Hello")
         assert chat.unread_count == 1
         assert chat.has_unread
 
@@ -21,24 +21,24 @@ class TestMessageQueue:
         assert chat.unread_count == 0
         assert not chat.has_unread
 
-    def test_queue_multiple(self):
+    async def test_queue_multiple(self):
         chat = ChatMCP()
-        chat.queue_message("First")
-        chat.queue_message("Second")
-        chat.queue_message("Third")
+        await chat.queue_message("First")
+        await chat.queue_message("Second")
+        await chat.queue_message("Third")
         assert chat.unread_count == 3
 
-    def test_custom_role_and_timestamp(self):
+    async def test_custom_role_and_timestamp(self):
         chat = ChatMCP()
-        chat.queue_message("Hello", role="system", timestamp="2026-01-01T00:00:00Z")
+        await chat.queue_message("Hello", role="system", timestamp="2026-01-01T00:00:00Z")
         assert chat.unread_count == 1
 
 
 class TestReadUnread:
     async def test_read_returns_messages(self):
         chat = ChatMCP()
-        chat.queue_message("Hello agent")
-        chat.queue_message("Fix the bug")
+        await chat.queue_message("Hello agent")
+        await chat.queue_message("Fix the bug")
 
         result = await chat.handle_read_unread()
         assert len(result["messages"]) == 2
@@ -48,7 +48,7 @@ class TestReadUnread:
 
     async def test_read_clears_queue(self):
         chat = ChatMCP()
-        chat.queue_message("Hello")
+        await chat.queue_message("Hello")
 
         await chat.handle_read_unread()
         assert chat.unread_count == 0
@@ -56,7 +56,7 @@ class TestReadUnread:
 
     async def test_subsequent_read_empty(self):
         chat = ChatMCP()
-        chat.queue_message("Hello")
+        await chat.queue_message("Hello")
 
         await chat.handle_read_unread()
         result = await chat.handle_read_unread()
@@ -69,24 +69,24 @@ class TestReadUnread:
 
     async def test_new_messages_after_read(self):
         chat = ChatMCP()
-        chat.queue_message("First")
+        await chat.queue_message("First")
         await chat.handle_read_unread()
 
-        chat.queue_message("Second")
+        await chat.queue_message("Second")
         result = await chat.handle_read_unread()
         assert len(result["messages"]) == 1
         assert result["messages"][0]["content"] == "Second"
 
     async def test_messages_have_timestamp(self):
         chat = ChatMCP()
-        chat.queue_message("Hello", timestamp="2026-03-15T12:00:00+00:00")
+        await chat.queue_message("Hello", timestamp="2026-03-15T12:00:00+00:00")
 
         result = await chat.handle_read_unread()
         assert result["messages"][0]["timestamp"] == "2026-03-15T12:00:00+00:00"
 
     async def test_messages_get_auto_timestamp(self):
         chat = ChatMCP()
-        chat.queue_message("Hello")
+        await chat.queue_message("Hello")
 
         result = await chat.handle_read_unread()
         # Should have a timestamp even without explicit one.
@@ -130,27 +130,47 @@ class TestNotificationInjection:
         chat = ChatMCP()
         assert chat.build_unread_notification() is None
 
-    def test_one_unread(self):
+    async def test_one_unread(self):
         chat = ChatMCP()
-        chat.queue_message("Hello")
+        await chat.queue_message("Hello")
         notification = chat.build_unread_notification()
         assert notification is not None
         assert "1 unread message" in notification
         assert "read_unread" in notification
 
-    def test_multiple_unread(self):
+    async def test_multiple_unread(self):
         chat = ChatMCP()
-        chat.queue_message("Hello")
-        chat.queue_message("Also this")
+        await chat.queue_message("Hello")
+        await chat.queue_message("Also this")
         notification = chat.build_unread_notification()
         assert "2 unread messages" in notification
         assert "read_unread" in notification
 
 
+class TestDrainUnreadNotification:
+    async def test_no_unread(self):
+        chat = ChatMCP()
+        assert await chat.drain_unread_notification() is None
+
+    async def test_one_unread(self):
+        chat = ChatMCP()
+        await chat.queue_message("Hello")
+        notification = await chat.drain_unread_notification()
+        assert notification is not None
+        assert "1 unread message" in notification
+
+    async def test_multiple_unread(self):
+        chat = ChatMCP()
+        await chat.queue_message("Hello")
+        await chat.queue_message("Also this")
+        notification = await chat.drain_unread_notification()
+        assert "2 unread messages" in notification
+
+
 class TestWaitForUnread:
     async def test_returns_immediately_if_has_unread(self):
         chat = ChatMCP()
-        chat.queue_message("Hello")
+        await chat.queue_message("Hello")
         result = await chat.wait_for_unread(timeout=0.1)
         assert result is True
 
@@ -164,7 +184,7 @@ class TestWaitForUnread:
 
         async def queue_after_delay():
             await asyncio.sleep(0.05)
-            chat.queue_message("Delayed message")
+            await chat.queue_message("Delayed message")
 
         task = asyncio.create_task(queue_after_delay())
         result = await chat.wait_for_unread(timeout=1.0)

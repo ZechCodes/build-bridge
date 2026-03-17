@@ -255,7 +255,7 @@ class TestToolEmission:
         await wrapper.connect()
 
         await wrapper.emit_tool_use("tu_1", "read_file", {"path": "/src/main.py"})
-        await wrapper.emit_tool_result("tu_1", "def main(): pass", is_error=False)
+        await wrapper.emit_tool_result("tu_1", "def main(): pass", is_error=False, tool_name="read_file")
         await asyncio.sleep(0.1)
 
         tool_events = [b for b in broadcast_log if "tool." in b[1].get("event_type", "")]

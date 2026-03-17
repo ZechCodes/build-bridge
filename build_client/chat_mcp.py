@@ -40,7 +40,7 @@ class ChatMCP:
         chat = ChatMCP(on_send=my_send_callback)
 
         # Queue an incoming user message (from device client WS).
-        chat.queue_message("user", "Fix the auth bug")
+        await chat.queue_message("Fix the auth bug")
 
         # Agent calls read_unread via MCP.
         result = await chat.handle_read_unread()
@@ -61,16 +61,20 @@ class ChatMCP:
     # Message queue (called by wrapper when chat.message arrives)
     # -----------------------------------------------------------------
 
-    def queue_message(
+    async def queue_message(
         self,
         content: str,
         role: str = "user",
         timestamp: str | None = None,
     ) -> None:
-        """Queue a user message for the agent to read via read_unread."""
+        """Queue a user message for the agent to read via read_unread.
+
+        Must be called from the same event loop as the other ChatMCP methods.
+        """
         ts = timestamp or datetime.now(timezone.utc).isoformat()
-        self._unread.append(UnreadMessage(role=role, content=content, timestamp=ts))
-        self._unread_event.set()
+        async with self._lock:
+            self._unread.append(UnreadMessage(role=role, content=content, timestamp=ts))
+            self._unread_event.set()
         log.debug("Queued message for agent (%d unread)", len(self._unread))
 
     @property
@@ -136,6 +140,9 @@ class ChatMCP:
         """Build an unread notification string for harness injection.
 
         Returns None if no unread messages.
+
+        Note: prefer ``drain_unread_notification`` for atomic check-and-build
+        to avoid races between ``wait_for_unread`` and ``handle_read_unread``.
         """
         count = len(self._unread)
         if count == 0:
@@ -151,6 +158,28 @@ class ChatMCP:
             f"You have {count} unread messages from the user. "
             "Use the read_unread tool to read them."
         )
+
+    async def drain_unread_notification(self) -> str | None:
+        """Atomically check for unread messages and build a notification.
+
+        Returns the notification string if there were unread messages,
+        or None if the queue was empty. The queue is NOT drained — the agent
+        still reads messages via ``handle_read_unread``. This just ensures the
+        notification is consistent with the queue state under the lock.
+        """
+        async with self._lock:
+            count = len(self._unread)
+            if count == 0:
+                return None
+            if count == 1:
+                return (
+                    "You have 1 unread message from the user. "
+                    "Use the read_unread tool to read it."
+                )
+            return (
+                f"You have {count} unread messages from the user. "
+                "Use the read_unread tool to read them."
+            )
 
     # -----------------------------------------------------------------
     # MCP server creation (requires `mcp` package)

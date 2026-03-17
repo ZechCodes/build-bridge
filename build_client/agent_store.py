@@ -186,6 +186,22 @@ class AgentStore:
         )
         self.db.commit()
 
+    def update_channel_agent(
+        self,
+        channel_id: str,
+        agent_id: str,
+        harness: str,
+        model: str,
+        system_prompt: str = "",
+    ) -> None:
+        """Update a channel with a new agent assignment and reactivate it."""
+        self.db.execute(
+            "UPDATE agent_channels SET agent_id = ?, harness = ?, model = ?, "
+            "system_prompt = ?, status = 'active', updated_at = ? WHERE id = ?",
+            (agent_id, harness, model, system_prompt, now_iso(), channel_id),
+        )
+        self.db.commit()
+
     def touch_channel(self, channel_id: str) -> None:
         """Update a channel's updated_at timestamp."""
         self.db.execute(
