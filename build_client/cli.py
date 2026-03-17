@@ -72,8 +72,8 @@ async def async_main(base_url: str, reset: bool = False, agent_port: int = DEFAU
         await agent_server.start()
         log.info("Agent server ready on port %s", agent_port)
 
-        # Re-spawn agents for channels that were active before restart.
-        active_channels = agent_store.list_active_channels()
+        # Re-spawn agents for channels that were active/idle before restart.
+        active_channels = agent_store.list_resumable_channels()
         if active_channels:
             log.info("Re-spawning agents for %d active channel(s)", len(active_channels))
             for ch in active_channels:

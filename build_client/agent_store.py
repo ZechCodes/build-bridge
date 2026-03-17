@@ -201,6 +201,17 @@ class AgentStore:
         ).fetchall()
         return [self._row_to_channel(r) for r in rows]
 
+    def list_resumable_channels(self) -> list[AgentChannel]:
+        """List channels that should have agents re-spawned on restart.
+
+        Includes 'active' (agent was working) and 'idle' (agent was waiting
+        for input) channels.
+        """
+        rows = self.db.execute(
+            "SELECT * FROM agent_channels WHERE status IN ('active', 'idle') ORDER BY updated_at DESC",
+        ).fetchall()
+        return [self._row_to_channel(r) for r in rows]
+
     # ----- Chat Messages -----
 
     def store_chat_message(
