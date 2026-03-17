@@ -208,6 +208,13 @@ def make_pre_compact_hook(wrapper: AgentWrapper):
 # ---------------------------------------------------------------------------
 
 
+def _stderr_logger(line: str) -> None:
+    """Log Claude CLI stderr output."""
+    line = line.rstrip()
+    if line:
+        log.info("[claude-stderr] %s", line)
+
+
 def build_agent_options(wrapper: AgentWrapper) -> ClaudeAgentOptions:
     """Build ClaudeAgentOptions with BAP hooks and Chat MCP tools."""
     tools = make_chat_tools(wrapper)
@@ -223,6 +230,7 @@ def build_agent_options(wrapper: AgentWrapper) -> ClaudeAgentOptions:
             "PreCompact": [HookMatcher(hooks=[make_pre_compact_hook(wrapper)])],
             "Stop": [HookMatcher(hooks=[make_stop_hook(wrapper)])],
         },
+        stderr=_stderr_logger,
     )
 
 
