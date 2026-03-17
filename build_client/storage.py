@@ -30,6 +30,7 @@ class Message:
     created_at: float
     delivered_at: float | None = None
     read_at: float | None = None
+    attachments: list[dict[str, Any]] | None = None  # [{file_id, filename, size, mime_type, path}]
 
 
 class MessageStore:
@@ -57,12 +58,18 @@ class MessageStore:
                 content TEXT NOT NULL,
                 created_at REAL NOT NULL,
                 delivered_at REAL,
-                read_at REAL
+                read_at REAL,
+                attachments TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_channel
                 ON messages(channel_id, created_at);
         """)
+        # Migration: add attachments column if missing (existing databases).
+        try:
+            self.db.execute("SELECT attachments FROM messages LIMIT 0")
+        except sqlite3.OperationalError:
+            self.db.execute("ALTER TABLE messages ADD COLUMN attachments TEXT")
 
     def create_channel(self, channel_id: str, name: str) -> Channel:
         """Create a new channel."""
@@ -102,14 +109,16 @@ class MessageStore:
         sender: str,
         content: str,
         created_at: float | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> Message:
         """Store a message."""
         now = created_at or time.time()
+        attachments_json = json.dumps(attachments) if attachments else None
         self.db.execute(
             """INSERT OR REPLACE INTO messages
-               (id, channel_id, session_id, sender, content, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (message_id, channel_id, session_id, sender, content, now),
+               (id, channel_id, session_id, sender, content, created_at, attachments)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (message_id, channel_id, session_id, sender, content, now, attachments_json),
         )
         self.db.commit()
         return Message(
@@ -119,6 +128,7 @@ class MessageStore:
             sender=sender,
             content=content,
             created_at=now,
+            attachments=attachments,
         )
 
     def mark_delivered(self, message_id: str) -> None:
@@ -170,6 +180,7 @@ class MessageStore:
                 created_at=r["created_at"],
                 delivered_at=r["delivered_at"],
                 read_at=r["read_at"],
+                attachments=json.loads(r["attachments"]) if r["attachments"] else None,
             )
             for r in reversed(rows)  # Return in chronological order
         ]

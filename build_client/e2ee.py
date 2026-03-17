@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
+import shutil
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from build_secure_transport import (
@@ -211,6 +215,10 @@ class E2EEHandler:
             await self._restart_agent(session, payload, ws)
         elif action == "list_workers":
             await self._send_worker_list(session, ws)
+        elif action == "upload_chunk":
+            await self._handle_upload_chunk(session, payload, ws)
+        elif action == "upload_complete":
+            await self._handle_upload_complete(session, payload, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -346,8 +354,9 @@ class E2EEHandler:
                 log.error("Failed to merge agent chat messages: %s", exc)
 
         # Merge and sort chronologically.
-        combined = [
-            {
+        combined = []
+        for m in e2ee_msgs:
+            msg_dict: dict[str, Any] = {
                 "id": m.id,
                 "channel_id": m.channel_id,
                 "sender": m.sender,
@@ -356,8 +365,10 @@ class E2EEHandler:
                 "delivered_at": m.delivered_at,
                 "read_at": m.read_at,
             }
-            for m in e2ee_msgs
-        ] + agent_msgs
+            if m.attachments:
+                msg_dict["attachments"] = m.attachments
+            combined.append(msg_dict)
+        combined += agent_msgs
 
         combined.sort(key=lambda m: m.get("created_at") or 0)
 
@@ -486,6 +497,7 @@ class E2EEHandler:
         message_id = frame.get("message_id")
         channel_id = payload.get("channel_id", "")
         content = payload.get("content", "")
+        attachments = payload.get("attachments")  # list[{file_id, filename, size, mime_type}] or None
 
         if not channel_id or not content:
             log.warning("Chat message missing channel_id or content: channel_id=%r, content=%r", channel_id, bool(content))
@@ -498,6 +510,7 @@ class E2EEHandler:
             session_id=session.session_id,
             sender="client",
             content=content,
+            attachments=attachments,
         )
 
         # Send delivered status (message reached device, but agent hasn't read it yet).
@@ -793,6 +806,179 @@ class E2EEHandler:
                 "workers": workers,
             },
         )
+
+    # ---- File Upload Handling ----
+
+    _UPLOADS_BASE = Path.home() / ".config" / "build" / "uploads"
+    _MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+
+    def _upload_tmp_dir(self, file_id: str) -> Path:
+        return self._UPLOADS_BASE / "tmp" / file_id
+
+    def _upload_final_dir(self, channel_id: str, file_id: str) -> Path:
+        return self._UPLOADS_BASE / channel_id / file_id
+
+    @staticmethod
+    def _sanitize_filename(name: str) -> str:
+        """Remove path separators and dangerous characters from a filename."""
+        name = os.path.basename(name)
+        # Strip leading dots to prevent hidden files.
+        name = name.lstrip(".")
+        return name or "upload"
+
+    async def _handle_upload_chunk(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Receive and store a single file chunk, then ack."""
+        file_id = payload.get("file_id", "")
+        channel_id = payload.get("channel_id", "")
+        chunk_index = payload.get("chunk_index", 0)
+        total_size = payload.get("total_size", 0)
+        data_b64 = payload.get("data", "")
+
+        if not file_id or not channel_id or not data_b64:
+            await self._send_frame(session, ws, payload={
+                "action": "upload_error",
+                "file_id": file_id,
+                "error": "missing required fields",
+            })
+            return
+
+        if total_size > self._MAX_FILE_SIZE:
+            await self._send_frame(session, ws, payload={
+                "action": "upload_error",
+                "file_id": file_id,
+                "error": f"file too large (max {self._MAX_FILE_SIZE // (1024*1024)} MB)",
+            })
+            return
+
+        try:
+            import base64
+            chunk_data = base64.b64decode(data_b64 + "==")  # pad for standard base64
+        except Exception:
+            # Try libsodium-style no-padding base64
+            try:
+                import base64 as _b64
+                # Add padding
+                padded = data_b64 + "=" * (-len(data_b64) % 4)
+                chunk_data = _b64.b64decode(padded)
+            except Exception as exc:
+                await self._send_frame(session, ws, payload={
+                    "action": "upload_error",
+                    "file_id": file_id,
+                    "error": f"invalid chunk data: {exc}",
+                })
+                return
+
+        tmp_dir = self._upload_tmp_dir(file_id)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write chunk file.
+        chunk_path = tmp_dir / f"chunk_{chunk_index}"
+        chunk_path.write_bytes(chunk_data)
+
+        # Store metadata on first chunk.
+        meta_path = tmp_dir / "meta.json"
+        if chunk_index == 0:
+            meta = {
+                "filename": self._sanitize_filename(payload.get("filename", "upload")),
+                "mime_type": payload.get("mime_type", "application/octet-stream"),
+                "total_size": total_size,
+                "total_chunks": payload.get("total_chunks", 1),
+                "channel_id": channel_id,
+            }
+            meta_path.write_text(json.dumps(meta))
+
+        log.info(
+            "Received chunk %d for upload %s (%d bytes)",
+            chunk_index, file_id[:8], len(chunk_data),
+        )
+
+        await self._send_frame(session, ws, payload={
+            "action": "chunk_ack",
+            "file_id": file_id,
+            "chunk_index": chunk_index,
+        })
+
+    async def _handle_upload_complete(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Assemble chunks, verify hash, and move to final location."""
+        file_id = payload.get("file_id", "")
+        channel_id = payload.get("channel_id", "")
+        expected_sha256 = payload.get("sha256", "")
+
+        tmp_dir = self._upload_tmp_dir(file_id)
+        meta_path = tmp_dir / "meta.json"
+
+        if not meta_path.exists():
+            await self._send_frame(session, ws, payload={
+                "action": "upload_error",
+                "file_id": file_id,
+                "error": "no chunks received for this upload",
+            })
+            return
+
+        meta = json.loads(meta_path.read_text())
+        total_chunks = meta["total_chunks"]
+        filename = meta["filename"]
+
+        # Assemble chunks.
+        assembled = bytearray()
+        for i in range(total_chunks):
+            chunk_path = tmp_dir / f"chunk_{i}"
+            if not chunk_path.exists():
+                await self._send_frame(session, ws, payload={
+                    "action": "upload_error",
+                    "file_id": file_id,
+                    "error": f"missing chunk {i}",
+                })
+                return
+            assembled.extend(chunk_path.read_bytes())
+
+        # Verify SHA-256.
+        actual_sha256 = hashlib.sha256(assembled).hexdigest()
+        if expected_sha256 and actual_sha256 != expected_sha256:
+            log.error(
+                "Upload %s hash mismatch: expected %s, got %s",
+                file_id[:8], expected_sha256[:12], actual_sha256[:12],
+            )
+            # Clean up temp files.
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await self._send_frame(session, ws, payload={
+                "action": "upload_error",
+                "file_id": file_id,
+                "error": "SHA-256 mismatch — file corrupted in transit",
+            })
+            return
+
+        # Write assembled file to final location.
+        final_dir = self._upload_final_dir(channel_id, file_id)
+        final_dir.mkdir(parents=True, exist_ok=True)
+        final_path = final_dir / filename
+        final_path.write_bytes(assembled)
+
+        # Clean up temp.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        log.info(
+            "Upload complete: %s → %s (%d bytes, sha256=%s)",
+            file_id[:8], final_path, len(assembled), actual_sha256[:12],
+        )
+
+        await self._send_frame(session, ws, payload={
+            "action": "upload_accepted",
+            "file_id": file_id,
+            "filename": filename,
+            "size": len(assembled),
+            "path": str(final_path),
+        })
 
     async def _send_frame(
         self,

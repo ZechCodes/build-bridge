@@ -138,7 +138,7 @@ def _describe_tool(tool_name: str, tool_input: dict) -> str:
         "Read": lambda i: f"Reading {os.path.basename(i.get('file_path', ''))}",
         "Edit": lambda i: f"Editing {os.path.basename(i.get('file_path', ''))}",
         "Write": lambda i: f"Writing {os.path.basename(i.get('file_path', ''))}",
-        "Bash": lambda i: f"Running: {i.get('command', '')[:60]}",
+        "Bash": lambda i: i.get("description") or f"Running: {i.get('command', '')[:60]}",
         "Glob": lambda i: f"Searching for {i.get('pattern', '')}",
         "Grep": lambda i: f"Searching for '{i.get('pattern', '')}'",
         "Agent": lambda i: f"Agent: {i.get('description', '')}",
@@ -227,7 +227,7 @@ def make_post_tool_hook(wrapper: AgentWrapper):
 
         await wrapper.emit_tool_result(
             tool_use_id or f"tu_{id(input_data)}",
-            content or (_describe_tool(tool_name, input_data.get("tool_input", {})) + " — done"),
+            content or "",
             is_error=is_error,
             tool_name=tool_name,
         )
