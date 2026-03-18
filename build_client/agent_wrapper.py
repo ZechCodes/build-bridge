@@ -173,7 +173,7 @@ class AgentWrapper:
         url = f"ws://{self._host}:{self._port}"
         log.info("Connecting to device client at %s ...", url)
 
-        self._ws = await ws_connect(url)
+        self._ws = await ws_connect(url, max_size=10 * 1024 * 1024)
 
         # Send agent.hello.
         hello = make_envelope(AGENT_HELLO, {

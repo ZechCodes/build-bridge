@@ -118,7 +118,8 @@ def make_chat_tools(wrapper: AgentWrapper) -> list:
                         "text": f"[{msg['role']}] {msg_content}",
                     })
                 elif isinstance(msg_content, list):
-                    # Multimodal content blocks — pass images through directly.
+                    # Multimodal content blocks — convert Anthropic image format
+                    # to MCP ImageContent format for the SDK.
                     for block in msg_content:
                         if block.get("type") == "text":
                             content_blocks.append({
@@ -126,8 +127,32 @@ def make_chat_tools(wrapper: AgentWrapper) -> list:
                                 "text": f"[{msg['role']}] {block['text']}",
                             })
                         elif block.get("type") == "image":
-                            # Pass Anthropic image block through as-is.
-                            content_blocks.append(block)
+                            # Convert Anthropic format → MCP format.
+                            # Anthropic: {"type": "image", "source": {"type": "base64", "media_type": "...", "data": "..."}}
+                            # MCP:       {"type": "image", "data": "...", "mimeType": "..."}
+                            source = block.get("source", {})
+                            content_blocks.append({
+                                "type": "image",
+                                "data": source.get("data", ""),
+                                "mimeType": source.get("media_type", "image/png"),
+                            })
+                        elif block.get("type") == "image_url":
+                            # OpenAI format — extract base64 data from data URL.
+                            image_url = block.get("image_url", {}).get("url", "")
+                            if image_url.startswith("data:"):
+                                # Parse "data:<mime>;base64,<data>"
+                                header, _, b64data = image_url.partition(",")
+                                mime = header.split(";")[0].replace("data:", "")
+                                content_blocks.append({
+                                    "type": "image",
+                                    "data": b64data,
+                                    "mimeType": mime or "image/png",
+                                })
+                            else:
+                                content_blocks.append({
+                                    "type": "text",
+                                    "text": f"[{msg['role']}] [Image: {image_url}]",
+                                })
                         else:
                             content_blocks.append(block)
 
@@ -208,7 +233,8 @@ def _extract_tool_content(tool_response) -> tuple[str, bool]:
     """Extract text content and error flag from a tool_response value.
 
     tool_response can be a string, a list of content blocks
-    (``[{"type": "text", "text": "..."}]``), or ``None``.
+    (``[{"type": "text", "text": "..."}]``), or ``None``.  It may also
+    be a dict wrapper around content blocks or a plain text value.
     """
     if tool_response is None:
         return "", False
@@ -220,21 +246,91 @@ def _extract_tool_content(tool_response) -> tuple[str, bool]:
         parts: list[str] = []
         for block in tool_response:
             if isinstance(block, dict):
+                # Handle {"type": "text", "text": "..."} content blocks.
                 if block.get("type") == "text":
                     parts.append(block.get("text", ""))
+                # Also handle blocks that have "content" instead of "text".
+                elif "content" in block and isinstance(block["content"], str):
+                    parts.append(block["content"])
+                # Fallback: if no known text field, stringify the block.
+                elif "text" not in block and "type" not in block:
+                    parts.append(str(block))
                 if block.get("is_error"):
                     is_error = True
             elif isinstance(block, str):
                 parts.append(block)
+            elif hasattr(block, "text"):
+                # Handle SDK model objects with a .text attribute.
+                parts.append(str(block.text))
+            else:
+                parts.append(str(block))
         text = "\n".join(parts)
     elif isinstance(tool_response, dict):
-        text = tool_response.get("text", "") or tool_response.get("content", "")
         is_error = bool(tool_response.get("is_error"))
+
+        # Check for standard content block wrappers first.
+        raw = tool_response.get("text", "") or tool_response.get("content", "")
+        if raw:
+            # If content is a list of blocks, recurse.
+            if isinstance(raw, list):
+                text, nested_err = _extract_tool_content(raw)
+                is_error = is_error or nested_err
+            elif isinstance(raw, str):
+                text = raw
+            else:
+                text = str(raw)
+        # Handle CLI tool-specific dict formats (Bash, Read, Grep, etc.).
+        elif "stdout" in tool_response:
+            # Bash tool: {stdout, stderr, interrupted, ...}
+            parts = []
+            if tool_response.get("stdout"):
+                parts.append(tool_response["stdout"])
+            if tool_response.get("stderr"):
+                parts.append(f"stderr: {tool_response['stderr']}")
+            text = "\n".join(parts)
+            is_error = bool(tool_response.get("interrupted"))
+        elif "filenames" in tool_response:
+            # Glob tool: {filenames, numFiles, durationMs, truncated}
+            # Grep (files_with_matches mode): {mode, filenames, numFiles}
+            filenames = tool_response.get("filenames", [])
+            content = tool_response.get("content", "")
+            if content:
+                # Grep content mode — has actual matched lines.
+                text = content
+            elif filenames:
+                text = "\n".join(filenames)
+            else:
+                num = tool_response.get("numFiles", 0)
+                text = f"No matches ({num} files)"
+        elif tool_response.get("type") == "text" and "file" in tool_response:
+            # Read tool: {type: "text", file: {filePath, content}}
+            file_info = tool_response["file"]
+            file_content = file_info.get("content", "")
+            text = file_content
+        elif "filePath" in tool_response and "oldString" in tool_response:
+            # Edit tool: {filePath, oldString, newString, ...}
+            fp = tool_response.get("filePath", "")
+            text = f"Edited {os.path.basename(fp)}"
+        elif "status" in tool_response and "prompt" in tool_response:
+            # Agent tool: {status, prompt, agentId}
+            status = tool_response.get("status", "")
+            text = f"Agent {status}"
+        elif "matches" in tool_response:
+            # ToolSearch: {matches, query, total_deferred_tools}
+            matches = tool_response.get("matches", [])
+            text = f"Found: {', '.join(matches)}" if matches else "No matches"
+        else:
+            # Fallback: JSON-serialize the dict so we don't lose data.
+            import json as _json
+            text = _json.dumps(tool_response, indent=2, default=str)
+    elif hasattr(tool_response, "text"):
+        # Handle SDK model objects with a .text attribute.
+        text = str(tool_response.text)
     else:
         text = str(tool_response)
 
     # Truncate oversized results so they don't blow the relay envelope limit.
-    if len(text) > _MAX_TOOL_RESULT_CHARS:
+    if isinstance(text, str) and len(text) > _MAX_TOOL_RESULT_CHARS:
         text = text[:_MAX_TOOL_RESULT_CHARS] + "\n…truncated"
 
     return text, is_error
@@ -250,9 +346,23 @@ def make_post_tool_hook(wrapper: AgentWrapper):
         if tool_name.startswith("mcp__build_chat__"):
             return {}
 
-        content, is_error = _extract_tool_content(
-            input_data.get("tool_response"),
-        )
+        tool_response = input_data.get("tool_response")
+
+        # Log what the SDK actually sends so we can diagnose missing results.
+        if tool_response is None:
+            log.warning(
+                "PostToolUse %s (id=%s): tool_response is None. input_data keys: %s",
+                tool_name, tool_use_id, list(input_data.keys()),
+            )
+        else:
+            resp_type = type(tool_response).__name__
+            resp_preview = str(tool_response)[:200]
+            log.info(
+                "PostToolUse %s (id=%s): tool_response type=%s preview=%s",
+                tool_name, tool_use_id, resp_type, resp_preview,
+            )
+
+        content, is_error = _extract_tool_content(tool_response)
 
         await wrapper.emit_tool_result(
             tool_use_id or f"tu_{id(input_data)}",

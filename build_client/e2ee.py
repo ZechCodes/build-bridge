@@ -409,7 +409,9 @@ class E2EEHandler:
     # tool uses with big inputs) easily exceed that.  We keep the last N
     # *tool_use* entries plus their matching tool_result entries so the console
     # shows recent activity without blowing the size budget.
-    _MAX_ACTIVITY_TOOL_USES = 150
+    # After encryption + base64 overhead (~33%), 150 KB payload ≈ 200 KB envelope.
+    _MAX_ACTIVITY_TOOL_USES = 50
+    _MAX_RESULT_CONTENT_LEN = 1000  # Truncate tool_result content for history
 
     async def _send_activity(
         self,
@@ -441,6 +443,11 @@ class E2EEHandler:
                                 k: (v[:200] + "…" if isinstance(v, str) and len(v) > 200 else v)
                                 for k, v in data["input"].items()
                             }
+                        # Trim large tool result content for history view.
+                        if entry.type == "tool_result":
+                            c = data.get("content", "")
+                            if isinstance(c, str) and len(c) > self._MAX_RESULT_CONTENT_LEN:
+                                data["content"] = c[:cls._MAX_RESULT_CONTENT_LEN] + "…"
                         entries.append({
                             "type": entry.type,
                             "data": data,
@@ -449,14 +456,30 @@ class E2EEHandler:
             except Exception as exc:
                 log.error("Failed to fetch activity history: %s", exc)
 
+        # Count total tool_uses before trimming for the console counter.
+        total_tool_uses = sum(1 for e in entries if e["type"] == "tool_use")
+
         # Trim to the most recent N tool_use entries (plus their results) so
         # the encrypted envelope stays under the relay's 256 KB size limit.
         if entries:
             entries = self._trim_activity_entries(entries)
 
+        # Safety: check estimated size and halve entries if still too large.
+        import json as _json
+        payload_json = _json.dumps(entries)
+        estimated_encrypted = len(payload_json) * 1.4  # encryption + base64 overhead
+        while estimated_encrypted > 200_000 and len(entries) > 10:
+            entries = entries[len(entries) // 2:]
+            payload_json = _json.dumps(entries)
+            estimated_encrypted = len(payload_json) * 1.4
+            log.warning(
+                "Activity payload too large, reduced to %d entries (%.0f KB est.)",
+                len(entries), estimated_encrypted / 1024,
+            )
+
         log.info(
-            "Sending %d activity entries for channel %s",
-            len(entries), channel_id[:8],
+            "Sending %d activity entries for channel %s (%.1f KB)",
+            len(entries), channel_id[:8], len(payload_json) / 1024,
         )
 
         await self._send_frame(
@@ -465,6 +488,7 @@ class E2EEHandler:
                 "action": "activity_history",
                 "channel_id": channel_id,
                 "entries": entries,
+                "total_tool_uses": total_tool_uses,
             },
         )
 
@@ -513,8 +537,9 @@ class E2EEHandler:
         content = payload.get("content", "")
         attachments = payload.get("attachments")  # list[{file_id, filename, size, mime_type}] or None
 
-        if not channel_id or not content:
-            log.warning("Chat message missing channel_id or content: channel_id=%r, content=%r", channel_id, bool(content))
+        if not channel_id or (not content and not attachments):
+            log.warning("Chat message missing channel_id or content: channel_id=%r, content=%r, attachments=%r",
+                        channel_id, bool(content), bool(attachments))
             return
 
         # Store the incoming message from the client.

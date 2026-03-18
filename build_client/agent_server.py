@@ -115,6 +115,7 @@ class AgentServer:
             self._port,
             ping_interval=AGENT_PING_INTERVAL_S,
             ping_timeout=AGENT_PING_TIMEOUT_S,
+            max_size=10 * 1024 * 1024,  # 10 MB — localhost only, large history payloads.
         )
         log.info("Agent server listening on ws://%s:%s/agent", self._host, self._port)
 
