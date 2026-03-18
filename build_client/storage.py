@@ -25,7 +25,7 @@ class Message:
     id: str
     channel_id: str
     session_id: str
-    sender: str  # "client" | "device" | "bot"
+    sender: str  # "client" | agent name (e.g., "Claude Code", "Codex CLI")
     content: str
     created_at: float
     delivered_at: float | None = None

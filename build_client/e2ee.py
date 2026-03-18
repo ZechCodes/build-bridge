@@ -52,6 +52,19 @@ class E2EEHandler:
         self._agent_server: AgentServer | None = None
         self._agent_spawner: AgentSpawner | None = None
 
+    def _get_agent_name(self, channel_id: str) -> str:
+        """Get the display name for the agent on a channel (e.g., 'Claude Code').
+
+        Falls back to 'device' if the harness cannot be determined.
+        """
+        if self._agent_server:
+            channel = self._agent_server.store.get_channel(channel_id)
+            if channel:
+                harness_info = get_harness(channel.harness)
+                if harness_info:
+                    return harness_info.name
+        return "device"
+
     def set_agent_server(self, server: AgentServer) -> None:
         """Register the agent server for forwarding chat messages."""
         self._agent_server = server
@@ -328,6 +341,7 @@ class E2EEHandler:
         if self._agent_server:
             try:
                 from datetime import datetime, timezone
+                agent_name = self._get_agent_name(channel_id)
                 chat_history = self._agent_server.store.get_chat_history(channel_id)
                 # Collect IDs from E2EE messages to avoid duplicates (user messages
                 # appear in both stores).
@@ -344,7 +358,7 @@ class E2EEHandler:
                     agent_msgs.append({
                         "id": cm.id,
                         "channel_id": cm.channel_id,
-                        "sender": "device" if cm.role == "assistant" else "client",
+                        "sender": agent_name if cm.role == "assistant" else "client",
                         "content": cm.content,
                         "created_at": ts,
                         "delivered_at": ts,
@@ -555,8 +569,20 @@ class E2EEHandler:
             )
             return
 
+        # Enrich attachment metadata with local file paths so agents can read files.
+        enriched_attachments = None
+        if attachments:
+            enriched_attachments = []
+            for att in attachments:
+                file_path = (
+                    self._upload_final_dir(channel_id, att["file_id"])
+                    / self._sanitize_filename(att.get("filename", "upload"))
+                )
+                enriched_attachments.append({**att, "path": str(file_path)})
+
         sent = await self._agent_server.send_chat_message(
             channel_id, content, msg_id=message_id,
+            attachments=enriched_attachments,
         )
         if sent:
             log.info("Forwarded chat message to agent on channel %s", channel_id[:8])
@@ -588,13 +614,14 @@ class E2EEHandler:
         channel_id: str,
         error_text: str,
     ) -> None:
-        """Send an error as a device message to the browser."""
+        """Send an error as an agent message to the browser."""
+        agent_name = self._get_agent_name(channel_id)
         error_id = str(uuid.uuid4())
         self.store.store_message(
             message_id=error_id,
             channel_id=channel_id,
             session_id=session.session_id,
-            sender="device",
+            sender=agent_name,
             content=f"⚠ {error_text}",
         )
         recent = self.store.get_messages(channel_id, limit=1)
@@ -606,7 +633,7 @@ class E2EEHandler:
                 "message": {
                     "id": error_id,
                     "channel_id": channel_id,
-                    "sender": "device",
+                    "sender": agent_name,
                     "content": f"⚠ {error_text}",
                     "created_at": created_at,
                 },

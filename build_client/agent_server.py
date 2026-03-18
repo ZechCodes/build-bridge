@@ -145,6 +145,7 @@ class AgentServer:
         channel_id: str,
         content: str | list[dict[str, Any]],
         msg_id: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> bool:
         """Forward a user chat message to the agent on a channel.
 
@@ -165,9 +166,13 @@ class AgentServer:
         self.store.store_chat_message(msg_id, channel_id, "user", content_str)
 
         # Send chat.message to agent.
+        payload: dict[str, Any] = {"role": "user", "content": content}
+        if attachments:
+            payload["attachments"] = attachments
+
         envelope = make_envelope(
             "chat.message",
-            {"role": "user", "content": content},
+            payload,
             msg_id=msg_id,
         )
         try:

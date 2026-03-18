@@ -123,7 +123,7 @@ class AgentWrapper:
         self._on_shutdown = on_shutdown
 
         # Chat MCP instance — tools share this state.
-        self.chat_mcp = ChatMCP(on_send=self._emit_chat_response)
+        self.chat_mcp = ChatMCP(on_send=self._emit_chat_response, harness=harness)
 
         # Connection state.
         self._ws: Any = None
@@ -285,7 +285,8 @@ class AgentWrapper:
         if msg_type == CHAT_MESSAGE:
             # Queue user message for Chat MCP read_unread.
             content = payload.get("content", "")
-            await self.chat_mcp.queue_message(content)
+            attachments = payload.get("attachments")
+            await self.chat_mcp.queue_message(content, attachments=attachments)
             log.debug("Queued user message (%d unread)", self.chat_mcp.unread_count)
 
         elif msg_type == CHAT_CANCEL:

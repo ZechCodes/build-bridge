@@ -105,7 +105,36 @@ def make_chat_tools(wrapper: AgentWrapper) -> list:
     async def read_unread(args):
         try:
             result = await wrapper.chat_mcp.handle_read_unread()
-            return {"content": [{"type": "text", "text": json.dumps(result)}]}
+            messages = result.get("messages", [])
+
+            # Build MCP content blocks — inline images as actual image blocks
+            # so the model can see them natively.
+            content_blocks: list[dict[str, Any]] = []
+            for msg in messages:
+                msg_content = msg.get("content", "")
+                if isinstance(msg_content, str):
+                    content_blocks.append({
+                        "type": "text",
+                        "text": f"[{msg['role']}] {msg_content}",
+                    })
+                elif isinstance(msg_content, list):
+                    # Multimodal content blocks — pass images through directly.
+                    for block in msg_content:
+                        if block.get("type") == "text":
+                            content_blocks.append({
+                                "type": "text",
+                                "text": f"[{msg['role']}] {block['text']}",
+                            })
+                        elif block.get("type") == "image":
+                            # Pass Anthropic image block through as-is.
+                            content_blocks.append(block)
+                        else:
+                            content_blocks.append(block)
+
+            if not content_blocks:
+                content_blocks = [{"type": "text", "text": json.dumps(result)}]
+
+            return {"content": content_blocks}
         except (ConnectionError, RuntimeError, OSError) as e:
             log.warning("read_unread tool error: %s", e)
             return {"content": [{"type": "text", "text": f"Error: {e}"}], "is_error": True}
