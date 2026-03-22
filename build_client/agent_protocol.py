@@ -39,20 +39,29 @@ ACTIVITY_END = "activity.end"
 TOOL_USE = "tool.use"
 TOOL_RESULT = "tool.result"
 
+# Interaction namespace (requires "interactions" capability).
+INTERACTION_REQUEST = "interaction.request"
+INTERACTION_RESPONSE = "interaction.response"
+
+# Agent state (no capability required — part of agent namespace).
+AGENT_STATE_UPDATE = "agent.state_update"
+
 # ---------------------------------------------------------------------------
 # Direction constraints
 # ---------------------------------------------------------------------------
 
 AGENT_TO_CLIENT: frozenset[str] = frozenset({
-    AGENT_HELLO, AGENT_GOODBYE,
+    AGENT_HELLO, AGENT_GOODBYE, AGENT_STATE_UPDATE,
     CHAT_RESPONSE,
     ACTIVITY_DELTA, ACTIVITY_PING, ACTIVITY_END,
     TOOL_USE, TOOL_RESULT,
+    INTERACTION_REQUEST,
 })
 
 CLIENT_TO_AGENT: frozenset[str] = frozenset({
     AGENT_CONFIGURED, AGENT_SHUTDOWN,
     CHAT_MESSAGE, CHAT_CANCEL,
+    INTERACTION_RESPONSE,
 })
 
 BIDIRECTIONAL: frozenset[str] = frozenset({AGENT_ERROR})
@@ -67,10 +76,12 @@ CAPABILITY_TYPES: dict[str, frozenset[str]] = {
     "chat": frozenset({CHAT_MESSAGE, CHAT_RESPONSE, CHAT_CANCEL}),
     "activity": frozenset({ACTIVITY_DELTA, ACTIVITY_PING, ACTIVITY_END}),
     "tools": frozenset({TOOL_USE, TOOL_RESULT}),
+    "interactions": frozenset({INTERACTION_REQUEST, INTERACTION_RESPONSE}),
 }
 
 AGENT_NAMESPACE_TYPES: frozenset[str] = frozenset({
     AGENT_HELLO, AGENT_CONFIGURED, AGENT_SHUTDOWN, AGENT_GOODBYE, AGENT_ERROR,
+    AGENT_STATE_UPDATE,
 })
 
 # ---------------------------------------------------------------------------

@@ -228,6 +228,10 @@ class E2EEHandler:
             await self._restart_agent(session, payload, ws)
         elif action == "list_workers":
             await self._send_worker_list(session, ws)
+        elif action == "interaction_response":
+            await self._handle_interaction_response(session, payload, ws)
+        elif action == "set_plan_mode":
+            await self._handle_set_plan_mode(session, payload, ws)
         elif action == "upload_chunk":
             await self._handle_upload_chunk(session, payload, ws)
         elif action == "upload_complete":
@@ -355,7 +359,7 @@ class E2EEHandler:
                         ts = dt.timestamp()
                     except (ValueError, TypeError):
                         ts = 0.0
-                    agent_msgs.append({
+                    msg_dict = {
                         "id": cm.id,
                         "channel_id": cm.channel_id,
                         "sender": agent_name if cm.role == "assistant" else "client",
@@ -363,7 +367,10 @@ class E2EEHandler:
                         "created_at": ts,
                         "delivered_at": ts,
                         "read_at": ts,
-                    })
+                    }
+                    if cm.metadata:
+                        msg_dict["metadata"] = cm.metadata
+                    agent_msgs.append(msg_dict)
             except Exception as exc:
                 log.error("Failed to merge agent chat messages: %s", exc)
 
@@ -858,6 +865,79 @@ class E2EEHandler:
                 "workers": workers,
             },
         )
+
+    # ------------------------------------------------------------------
+    # Interaction & plan mode actions
+    # ------------------------------------------------------------------
+
+    async def _handle_interaction_response(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Forward user's interaction response to the agent."""
+        channel_id = payload.get("channel_id", "")
+        interaction_id = payload.get("interaction_id", "")
+        selected_option = payload.get("selected_option")
+        freeform_response = payload.get("freeform_response")
+
+        if not channel_id or not interaction_id:
+            log.warning("interaction_response missing channel_id or interaction_id")
+            return
+
+        # Persist the response.
+        if self._agent_server:
+            self._agent_server.store.resolve_interaction(
+                interaction_id, channel_id, selected_option, freeform_response,
+            )
+
+        # Forward to agent.
+        if self._agent_server:
+            sent = await self._agent_server.send_interaction_response(
+                channel_id, interaction_id, selected_option, freeform_response,
+            )
+            if sent:
+                log.info("Forwarded interaction.response to agent on channel %s", channel_id[:8])
+            else:
+                log.error("Failed to forward interaction.response on channel %s", channel_id[:8])
+                await self._send_error_message(
+                    session, ws, channel_id,
+                    "Failed to send response to agent. The agent may have disconnected.",
+                )
+
+    async def _handle_set_plan_mode(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Toggle plan mode — inject instruction to agent as chat message."""
+        channel_id = payload.get("channel_id", "")
+        plan_mode = payload.get("plan_mode", False)
+
+        if not channel_id:
+            return
+
+        # Update store.
+        if self._agent_server:
+            self._agent_server.store.update_plan_mode(channel_id, plan_mode)
+
+        # Inject as chat message instruction to agent.
+        instruction = (
+            "The user has requested you enter plan mode. Use the EnterPlanMode tool."
+            if plan_mode else
+            "The user has requested you exit plan mode. Use the ExitPlanMode tool."
+        )
+        if self._agent_server:
+            await self._agent_server.send_chat_message(channel_id, instruction)
+
+        # Confirm to browser.
+        await self._send_frame(session, ws, payload={
+            "action": "plan_mode_updated",
+            "channel_id": channel_id,
+            "plan_mode": plan_mode,
+        })
 
     # ---- File Upload Handling ----
 

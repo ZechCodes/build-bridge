@@ -35,6 +35,7 @@ class AgentChannel:
     created_at: str
     updated_at: str
     working_directory: str = ""
+    plan_mode: bool = False
 
 
 @dataclass
@@ -44,6 +45,7 @@ class ChatMessage:
     role: str  # user | assistant
     content: str  # text or JSON-encoded content block array
     created_at: str
+    metadata: str | None = None  # JSON interaction data, NULL for regular messages
 
 
 @dataclass
@@ -135,6 +137,17 @@ class AgentStore:
             CREATE INDEX IF NOT EXISTS idx_tool_uses_channel
                 ON tool_uses(channel_id, created_at);
         """)
+
+        # Migrations for existing databases.
+        for stmt in (
+            "ALTER TABLE chat_messages ADD COLUMN metadata TEXT",
+            "ALTER TABLE agent_channels ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
+        ):
+            try:
+                self.db.execute(stmt)
+                self.db.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists.
 
     # ----- Channels -----
 
@@ -253,13 +266,16 @@ class AgentStore:
             "SELECT * FROM chat_messages WHERE channel_id = ? ORDER BY created_at ASC",
             (channel_id,),
         ).fetchall()
-        return [
-            ChatMessage(
-                id=r["id"], channel_id=r["channel_id"],
-                role=r["role"], content=r["content"], created_at=r["created_at"],
-            )
-            for r in rows
-        ]
+        return [self._row_to_chat_message(r) for r in rows]
+
+    @staticmethod
+    def _row_to_chat_message(row: sqlite3.Row) -> ChatMessage:
+        keys = row.keys()
+        return ChatMessage(
+            id=row["id"], channel_id=row["channel_id"],
+            role=row["role"], content=row["content"], created_at=row["created_at"],
+            metadata=row["metadata"] if "metadata" in keys else None,
+        )
 
     # ----- Activity Log -----
 
@@ -360,13 +376,89 @@ class AgentStore:
 
     @staticmethod
     def _row_to_channel(row: sqlite3.Row) -> AgentChannel:
+        keys = row.keys()
         return AgentChannel(
             id=row["id"], agent_id=row["agent_id"],
             harness=row["harness"], model=row["model"],
             system_prompt=row["system_prompt"], status=row["status"],
             created_at=row["created_at"], updated_at=row["updated_at"],
-            working_directory=row["working_directory"] if "working_directory" in row.keys() else "",
+            working_directory=row["working_directory"] if "working_directory" in keys else "",
+            plan_mode=bool(row["plan_mode"]) if "plan_mode" in keys else False,
         )
+
+    # ----- Interactions -----
+
+    def store_interaction(
+        self,
+        interaction_id: str,
+        channel_id: str,
+        question: str,
+        kind: str,
+        options: list[dict[str, Any]],
+        allow_freeform: bool,
+        plan: str | None = None,
+    ) -> ChatMessage:
+        """Store an interaction request as an assistant chat message with metadata."""
+        now = now_iso()
+        metadata = json.dumps({
+            "interaction_id": interaction_id,
+            "kind": kind,
+            "options": options,
+            "allow_freeform": allow_freeform,
+            "plan": plan,
+        })
+        self.db.execute(
+            "INSERT OR REPLACE INTO chat_messages (id, channel_id, role, content, created_at, metadata) "
+            "VALUES (?, ?, 'assistant', ?, ?, ?)",
+            (interaction_id, channel_id, question, now, metadata),
+        )
+        self.db.commit()
+        self.touch_channel(channel_id)
+        return ChatMessage(
+            id=interaction_id, channel_id=channel_id,
+            role="assistant", content=question, created_at=now, metadata=metadata,
+        )
+
+    def resolve_interaction(
+        self,
+        interaction_id: str,
+        channel_id: str,
+        selected_option: str | None,
+        freeform_response: str | None,
+    ) -> None:
+        """Mark an interaction as resolved and store the user's response."""
+        now = now_iso()
+        # Update original message metadata with resolution.
+        row = self.db.execute(
+            "SELECT metadata FROM chat_messages WHERE id = ?", (interaction_id,),
+        ).fetchone()
+        if row and row["metadata"]:
+            meta = json.loads(row["metadata"])
+            meta["selected_option"] = selected_option
+            meta["freeform_response"] = freeform_response
+            meta["resolved_at"] = now
+            self.db.execute(
+                "UPDATE chat_messages SET metadata = ? WHERE id = ?",
+                (json.dumps(meta), interaction_id),
+            )
+        # Store user response as a message.
+        response_text = freeform_response or selected_option or ""
+        response_id = f"{interaction_id}_resp"
+        self.db.execute(
+            "INSERT OR REPLACE INTO chat_messages (id, channel_id, role, content, created_at) "
+            "VALUES (?, ?, 'user', ?, ?)",
+            (response_id, channel_id, response_text, now),
+        )
+        self.db.commit()
+        self.touch_channel(channel_id)
+
+    def update_plan_mode(self, channel_id: str, enabled: bool) -> None:
+        """Update a channel's plan_mode state."""
+        self.db.execute(
+            "UPDATE agent_channels SET plan_mode = ?, updated_at = ? WHERE id = ?",
+            (int(enabled), now_iso(), channel_id),
+        )
+        self.db.commit()
 
     def close(self) -> None:
         self.db.close()

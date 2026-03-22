@@ -53,9 +53,12 @@ from build_client.agent_protocol import (
     AGENT_GOODBYE,
     AGENT_HELLO,
     AGENT_SHUTDOWN,
+    AGENT_STATE_UPDATE,
     CHAT_CANCEL,
     CHAT_MESSAGE,
     CHAT_RESPONSE,
+    INTERACTION_REQUEST,
+    INTERACTION_RESPONSE,
     PROTOCOL_VERSION,
     TOOL_RESULT,
     TOOL_USE,
@@ -116,7 +119,7 @@ class AgentWrapper:
         self._port = port
         self._harness = harness
         self._model = model
-        self._capabilities = capabilities or ["chat", "activity", "tools"]
+        self._capabilities = capabilities or ["chat", "activity", "tools", "interactions"]
         self._agent_id = agent_id or f"agt_{uuid.uuid4().hex[:8]}"
         self._reconnect = reconnect
         self._on_cancel = on_cancel
@@ -131,6 +134,9 @@ class AgentWrapper:
         self._connected = asyncio.Event()
         self._shutdown_requested = asyncio.Event()
         self._activity_index = 0
+
+        # Pending interactions — interaction_id -> (Event, result_dict).
+        self._pending_interactions: dict[str, tuple[asyncio.Event, dict[str, Any]]] = {}
 
     # -----------------------------------------------------------------
     # Properties
@@ -275,6 +281,7 @@ class AgentWrapper:
         except ConnectionClosed:
             log.info("Connection to device client closed")
         finally:
+            self.cancel_all_interactions()
             self._connected.clear()
 
     async def _handle_message(self, data: dict[str, Any]) -> None:
@@ -296,9 +303,14 @@ class AgentWrapper:
             # Emit activity.end with cancelled reason.
             await self.emit_activity_end("cancelled")
 
+        elif msg_type == INTERACTION_RESPONSE:
+            interaction_id = payload.get("interaction_id", "")
+            self.resolve_interaction(interaction_id, payload)
+
         elif msg_type == AGENT_SHUTDOWN:
             reason = payload.get("reason", "client_shutdown")
             log.info("Received agent.shutdown (reason=%s)", reason)
+            self.cancel_all_interactions()
             if self._on_shutdown:
                 await self._on_shutdown(reason)
             await self.disconnect("shutdown_ack")
@@ -399,6 +411,87 @@ class AgentWrapper:
             "is_error": is_error,
         })
         await self._send(envelope)
+
+    # -----------------------------------------------------------------
+    # Interactions (blocking question/approval flow)
+    # -----------------------------------------------------------------
+
+    async def emit_interaction_request(
+        self,
+        interaction_id: str,
+        question: str,
+        kind: str = "question",
+        options: list[dict[str, Any]] | None = None,
+        allow_freeform: bool = True,
+        plan: str | None = None,
+    ) -> None:
+        """Emit interaction.request — agent is asking the user a question."""
+        envelope = make_envelope(INTERACTION_REQUEST, {
+            "interaction_id": interaction_id,
+            "kind": kind,
+            "question": question,
+            "options": options or [],
+            "allow_freeform": allow_freeform,
+            "plan": plan,
+        })
+        await self._send(envelope)
+
+    async def emit_state_update(self, *, plan_mode: bool) -> None:
+        """Emit agent.state_update — report harness state to browser."""
+        envelope = make_envelope(AGENT_STATE_UPDATE, {
+            "plan_mode": plan_mode,
+        })
+        await self._send(envelope)
+
+    async def request_interaction(
+        self,
+        interaction_id: str,
+        question: str,
+        kind: str = "question",
+        options: list[dict[str, Any]] | None = None,
+        allow_freeform: bool = True,
+        plan: str | None = None,
+        timeout: float = 300.0,
+    ) -> dict[str, Any]:
+        """Emit interaction request and block until the user responds.
+
+        Returns dict with ``selected_option`` and/or ``freeform_response``.
+        Raises asyncio.TimeoutError if no response within *timeout* seconds.
+        """
+        event = asyncio.Event()
+        result: dict[str, Any] = {}
+        self._pending_interactions[interaction_id] = (event, result)
+
+        try:
+            await self.emit_interaction_request(
+                interaction_id, question, kind, options, allow_freeform, plan,
+            )
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+            return result
+        except asyncio.TimeoutError:
+            log.warning("Interaction %s timed out after %.0fs", interaction_id[:12], timeout)
+            return {"selected_option": None, "freeform_response": None, "timed_out": True}
+        finally:
+            self._pending_interactions.pop(interaction_id, None)
+
+    def resolve_interaction(self, interaction_id: str, payload: dict[str, Any]) -> None:
+        """Resolve a pending interaction with the user's response."""
+        entry = self._pending_interactions.get(interaction_id)
+        if not entry:
+            log.warning("Interaction response for unknown interaction: %s", interaction_id[:12])
+            return
+        event, result = entry
+        result.update(payload)
+        event.set()
+        log.info("Interaction %s resolved", interaction_id[:12])
+
+    def cancel_all_interactions(self) -> None:
+        """Cancel all pending interactions (e.g. on shutdown/disconnect)."""
+        for interaction_id, (event, result) in self._pending_interactions.items():
+            result["cancelled"] = True
+            event.set()
+            log.info("Interaction %s cancelled", interaction_id[:12])
+        self._pending_interactions.clear()
 
     # -----------------------------------------------------------------
     # Internal

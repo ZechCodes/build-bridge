@@ -25,6 +25,7 @@ from build_client.agent_protocol import (
     AGENT_GOODBYE,
     AGENT_HELLO,
     AGENT_CONFIGURED,
+    AGENT_STATE_UPDATE,
     AGENT_TO_CLIENT,
     BIDIRECTIONAL,
     CHAT_RESPONSE,
@@ -34,6 +35,8 @@ from build_client.agent_protocol import (
     ERROR_PROTOCOL_VIOLATION,
     ERROR_RECONNECT_FAILED,
     ERROR_UNKNOWN_TYPE,
+    INTERACTION_REQUEST,
+    INTERACTION_RESPONSE,
     PROTOCOL_VERSION,
     TOOL_RESULT,
     TOOL_USE,
@@ -198,6 +201,34 @@ class AgentServer:
             await agent.ws.send(json.dumps(envelope))
             return True
         except Exception:
+            return False
+
+    async def send_interaction_response(
+        self,
+        channel_id: str,
+        interaction_id: str,
+        selected_option: str | None,
+        freeform_response: str | None,
+    ) -> bool:
+        """Forward an interaction response to the agent on a channel."""
+        agent_id = self._channel_to_agent.get(channel_id)
+        if not agent_id:
+            return False
+        agent = self._agents.get(agent_id)
+        if not agent:
+            return False
+
+        envelope = make_envelope(INTERACTION_RESPONSE, {
+            "interaction_id": interaction_id,
+            "selected_option": selected_option,
+            "freeform_response": freeform_response,
+        })
+        try:
+            await agent.ws.send(json.dumps(envelope))
+            log.info("Sent interaction.response to agent %s (interaction=%s)", agent_id[:8], interaction_id[:12])
+            return True
+        except Exception as exc:
+            log.error("Failed to send interaction.response to agent: %s", exc)
             return False
 
     def get_channel_for_agent(self, agent_id: str) -> str | None:
@@ -621,6 +652,47 @@ class AgentServer:
         if fatal:
             self.store.update_channel_status(agent.channel_id, "error")
 
+    async def _handle_interaction_request(
+        self, agent: AgentConnection, data: dict[str, Any],
+    ) -> None:
+        """Handle interaction.request — agent is asking the user a question."""
+        payload = data["payload"]
+        interaction_id = payload.get("interaction_id", "")
+        kind = payload.get("kind", "question")
+        question = payload.get("question", "")
+        options = payload.get("options", [])
+        allow_freeform = payload.get("allow_freeform", True)
+        plan = payload.get("plan")
+
+        # Persist as a chat message with metadata.
+        self.store.store_interaction(
+            interaction_id, agent.channel_id, question, kind, options, allow_freeform, plan,
+        )
+
+        # Broadcast to browser.
+        await self._notify_browser(agent.channel_id, {
+            "action": "agent_event",
+            "channel_id": agent.channel_id,
+            "event_type": "interaction.request",
+            "event": payload,
+        })
+
+    async def _handle_state_update(
+        self, agent: AgentConnection, data: dict[str, Any],
+    ) -> None:
+        """Handle agent.state_update — agent reports its state."""
+        payload = data["payload"]
+        plan_mode = payload.get("plan_mode")
+        if plan_mode is not None:
+            self.store.update_plan_mode(agent.channel_id, plan_mode)
+
+        await self._notify_browser(agent.channel_id, {
+            "action": "agent_event",
+            "channel_id": agent.channel_id,
+            "event_type": "agent.state_update",
+            "event": payload,
+        })
+
     # Handler dispatch table.
     _handlers: dict[str, Any] = {
         CHAT_RESPONSE: _handle_chat_response,
@@ -631,6 +703,8 @@ class AgentServer:
         TOOL_RESULT: _handle_tool_result,
         AGENT_GOODBYE: _handle_agent_goodbye,
         AGENT_ERROR: _handle_agent_error,
+        INTERACTION_REQUEST: _handle_interaction_request,
+        AGENT_STATE_UPDATE: _handle_state_update,
     }
 
     # -----------------------------------------------------------------

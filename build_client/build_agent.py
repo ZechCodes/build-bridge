@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from typing import Any
 
 from claude_agent_sdk import (
@@ -78,13 +79,16 @@ except (ImportError, AttributeError) as _patch_err:
 # ---------------------------------------------------------------------------
 
 CHAT_CONTEXT = (
-    "IMPORTANT: You are communicating with the user through a chat interface.\n"
+    "IMPORTANT: You are communicating with the user through a remote chat interface.\n"
     "- The user CANNOT see your text responses. The ONLY way to communicate "
     "with the user is by calling the mcp__build_chat__send tool.\n"
     "- When notified of unread messages, call mcp__build_chat__read_unread "
     "to read them.\n"
     "- Keep messages concise and natural. Don't narrate your thought process.\n"
-    "- For complex tasks, use planning mode.\n\n"
+    "- AskUserQuestion works through the remote UI — use it normally when you "
+    "need user input. The user will see a prompt in their browser.\n"
+    "- Plan mode (EnterPlanMode/ExitPlanMode) works through the remote UI — "
+    "plan approval is handled by the browser interface.\n\n"
 )
 
 
@@ -204,7 +208,7 @@ def _describe_tool(tool_name: str, tool_input: dict) -> str:
 
 
 def make_pre_tool_hook(wrapper: AgentWrapper):
-    """PreToolUse hook — emit tool.use to device client."""
+    """PreToolUse hook — emit tool.use and intercept interactive tools."""
 
     async def hook(input_data, tool_use_id, context):
         tool_name = input_data.get("tool_name", "")
@@ -214,7 +218,56 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
         if tool_name.startswith("mcp__build_chat__"):
             return {"continue_": True}
 
-        # Emit tool.use via BAP.
+        # --- Interactive tool interception ---
+
+        if tool_name == "AskUserQuestion":
+            question = tool_input.get("question", "")
+            log.info("Intercepting AskUserQuestion: %s", question[:80])
+            result = await wrapper.request_interaction(
+                interaction_id=f"int_{uuid.uuid4().hex[:16]}",
+                question=question,
+                kind="question",
+                options=[],
+                allow_freeform=True,
+            )
+            if result.get("cancelled") or result.get("timed_out"):
+                return {
+                    "continue_": False,
+                    "systemMessage": "The user did not respond to your question.",
+                }
+            answer = result.get("freeform_response") or result.get("selected_option", "")
+            return {
+                "continue_": False,
+                "systemMessage": f"The user responded to your question: {answer}",
+            }
+
+        if tool_name == "ExitPlanMode":
+            log.info("Intercepting ExitPlanMode for plan approval")
+            await wrapper.emit_state_update(plan_mode=False)
+            result = await wrapper.request_interaction(
+                interaction_id=f"int_{uuid.uuid4().hex[:16]}",
+                question="Review and approve the plan?",
+                kind="plan_review",
+                options=[
+                    {"id": "approve", "label": "Approve"},
+                    {"id": "reject", "label": "Reject"},
+                ],
+                allow_freeform=True,
+            )
+            if result.get("selected_option") == "approve":
+                return {"continue_": True}
+            feedback = result.get("freeform_response") or "Plan rejected by user"
+            return {
+                "continue_": False,
+                "systemMessage": f"The user rejected the plan: {feedback}",
+            }
+
+        if tool_name == "EnterPlanMode":
+            await wrapper.emit_state_update(plan_mode=True)
+            # Fall through to normal emit + continue.
+
+        # --- Standard tool.use emission ---
+
         await wrapper.emit_tool_use(
             tool_use_id or f"tu_{id(input_data)}",
             tool_name,
