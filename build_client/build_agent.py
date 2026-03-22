@@ -221,13 +221,39 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
         # --- Interactive tool interception ---
 
         if tool_name == "AskUserQuestion":
-            question = tool_input.get("question", "")
-            log.info("Intercepting AskUserQuestion: %s", question[:80])
+            log.info("AskUserQuestion tool_input: %s", json.dumps(tool_input, default=str)[:1000])
+            # Extract question text — try known field names.
+            question = (
+                tool_input.get("question")
+                or tool_input.get("text")
+                or tool_input.get("prompt")
+                or tool_input.get("body")
+                or tool_input.get("message")
+                or ""
+            )
+            options_raw = tool_input.get("options", [])
+            multi_select = tool_input.get("multiSelect", False)
+
+            # Build structured options from the tool's option format.
+            options = []
+            for opt in options_raw:
+                if isinstance(opt, dict):
+                    options.append({
+                        "id": opt.get("value", opt.get("id", opt.get("label", ""))),
+                        "label": opt.get("label", opt.get("value", "")),
+                    })
+                elif isinstance(opt, str):
+                    options.append({"id": opt, "label": opt})
+
+            log.info(
+                "Intercepting AskUserQuestion: question=%r, %d options, multiSelect=%s",
+                question[:80], len(options), multi_select,
+            )
             result = await wrapper.request_interaction(
                 interaction_id=f"int_{uuid.uuid4().hex[:16]}",
                 question=question,
                 kind="question",
-                options=[],
+                options=options,
                 allow_freeform=True,
             )
             if result.get("cancelled") or result.get("timed_out"):
