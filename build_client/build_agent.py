@@ -33,7 +33,10 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     HookMatcher,
+    PermissionResultAllow,
+    PermissionResultDeny,
     TextBlock,
+    ToolPermissionContext,
     ToolUseBlock,
     create_sdk_mcp_server,
     tool,
@@ -221,15 +224,12 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
         # --- Interactive tool interception ---
 
         if tool_name == "AskUserQuestion":
-            log.info("AskUserQuestion tool_input keys: %s", list(tool_input.keys()))
             # AskUserQuestion uses "questions" (plural) — an array of question
             # objects, each with: question, header, options, multiSelect.
             questions_raw = tool_input.get("questions", [])
             if not questions_raw:
-                # Fallback: maybe a single question object at top level.
                 questions_raw = [tool_input]
 
-            # Build a combined question text and options from all questions.
             question_parts = []
             options = []
             for q in questions_raw:
@@ -244,17 +244,15 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
                     if isinstance(opt, dict):
                         label = opt.get("label", "")
                         desc = opt.get("description", "")
-                        opt_id = label  # Use label as ID since there's no explicit id.
+                        opt_id = label
                         display = f"{label} — {desc}" if desc else label
                         options.append({"id": opt_id, "label": display})
                     elif isinstance(opt, str):
                         options.append({"id": opt, "label": opt})
 
             question = "\n\n".join(question_parts)
-            log.info(
-                "Intercepting AskUserQuestion: question=%r, %d options",
-                question[:80], len(options),
-            )
+            log.info("Intercepting AskUserQuestion: %s (%d options)", question[:80], len(options))
+
             result = await wrapper.request_interaction(
                 interaction_id=f"int_{uuid.uuid4().hex[:16]}",
                 question=question,
@@ -263,74 +261,24 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
                 allow_freeform=True,
             )
             if result.get("cancelled") or result.get("timed_out"):
-                return {
-                    "continue_": True,
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "additionalContext": "The user did not respond to your question in time.",
-                    },
-                }
-            answer = result.get("freeform_response") or result.get("selected_option", "")
+                reason = "User did not respond to your question."
+            else:
+                answer = result.get("freeform_response") or result.get("selected_option", "")
+                reason = f"User answered: {answer}"
+
+            # Use permissionDecision: deny with the answer as reason.
+            # Claude sees the deny reason as the tool result.
             return {
-                "continue_": True,
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
-                    "additionalContext": f"The user has already responded via the remote UI. Their answer: {answer}",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
                 },
             }
 
-        if tool_name == "ExitPlanMode":
-            log.info("Intercepting ExitPlanMode for plan approval")
-            log.info("ExitPlanMode tool_input: %s", json.dumps(tool_input, default=str)[:500])
-            await wrapper.emit_state_update(plan_mode=False)
-
-            # Extract plan content from tool_input (injected by normalizeToolInput)
-            # or read from the plan file on disk.
-            plan_content = tool_input.get("plan", "")
-            if not plan_content:
-                # Try to find plan file in .claude/plans/
-                import glob
-                plan_files = sorted(
-                    glob.glob(os.path.join(os.getcwd(), ".claude", "plans", "*.md")),
-                    key=os.path.getmtime,
-                    reverse=True,
-                )
-                if not plan_files:
-                    plan_files = sorted(
-                        glob.glob(os.path.join(os.path.expanduser("~"), ".claude", "plans", "*.md")),
-                        key=os.path.getmtime,
-                        reverse=True,
-                    )
-                if plan_files:
-                    try:
-                        with open(plan_files[0]) as f:
-                            plan_content = f.read()
-                        log.info("Read plan from %s (%d chars)", plan_files[0], len(plan_content))
-                    except Exception as exc:
-                        log.warning("Failed to read plan file: %s", exc)
-
-            result = await wrapper.request_interaction(
-                interaction_id=f"int_{uuid.uuid4().hex[:16]}",
-                question="Review and approve the plan?",
-                kind="plan_review",
-                options=[
-                    {"id": "approve", "label": "Approve"},
-                    {"id": "reject", "label": "Reject"},
-                ],
-                allow_freeform=True,
-                plan=plan_content or None,
-            )
-            if result.get("selected_option") == "approve":
-                return {"continue_": True}
-            feedback = result.get("freeform_response") or "Plan rejected by user"
-            return {
-                "continue_": False,
-                "systemMessage": f"The user rejected the plan: {feedback}",
-            }
-
-        if tool_name == "EnterPlanMode":
-            await wrapper.emit_state_update(plan_mode=True)
-            # Fall through to normal emit + continue.
+        # Skip EnterPlanMode/ExitPlanMode here — handled by can_use_tool.
+        if tool_name in ("EnterPlanMode", "ExitPlanMode"):
+            return {"continue_": True}
 
         # --- Standard tool.use emission ---
 
@@ -528,6 +476,78 @@ def _stderr_logger(line: str) -> None:
         log.info("[claude-stderr] %s", line)
 
 
+def _read_plan_file(tool_input: dict) -> str:
+    """Read plan content for ExitPlanMode approval.
+
+    Checks tool_input['plan'] (injected by normalizeToolInput), then falls
+    back to the most recently modified file in ~/.claude/plans/.
+    """
+    plan = tool_input.get("plan", "")
+    if plan:
+        return plan
+
+    from pathlib import Path
+    plans_dir = Path.home() / ".claude" / "plans"
+    if plans_dir.is_dir():
+        plan_files = sorted(plans_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if plan_files:
+            try:
+                content = plan_files[0].read_text().strip()
+                if content:
+                    log.info("Read plan from %s (%d chars)", plan_files[0], len(content))
+                    return content
+            except OSError as exc:
+                log.warning("Failed to read plan file: %s", exc)
+
+    return "The agent has finished designing a plan and is requesting approval."
+
+
+def make_can_use_tool(wrapper: AgentWrapper):
+    """Create a can_use_tool callback for ExitPlanMode/EnterPlanMode approval.
+
+    The CLI dispatches ExitPlanMode through can_use_tool — NOT through
+    PreToolUse hooks. This callback handles plan approval via the interaction
+    system and auto-allows everything else.
+    """
+
+    async def callback(
+        tool_name: str,
+        tool_input: dict,
+        context: ToolPermissionContext,
+    ) -> PermissionResultAllow | PermissionResultDeny:
+        if tool_name == "EnterPlanMode":
+            await wrapper.emit_state_update(plan_mode=True)
+            return PermissionResultAllow()
+
+        if tool_name != "ExitPlanMode":
+            return PermissionResultAllow()
+
+        log.info("Intercepted ExitPlanMode (can_use_tool)")
+        await wrapper.emit_state_update(plan_mode=False)
+
+        plan_content = _read_plan_file(tool_input)
+
+        result = await wrapper.request_interaction(
+            interaction_id=f"int_{uuid.uuid4().hex[:16]}",
+            question="Review and approve the plan?",
+            kind="plan_review",
+            options=[
+                {"id": "approve", "label": "Approve"},
+                {"id": "reject", "label": "Reject"},
+            ],
+            allow_freeform=True,
+            plan=plan_content,
+        )
+
+        if result.get("selected_option") == "approve":
+            return PermissionResultAllow()
+
+        reason = result.get("freeform_response") or "User rejected the plan."
+        return PermissionResultDeny(message=reason)
+
+    return callback
+
+
 def build_agent_options(wrapper: AgentWrapper) -> ClaudeAgentOptions:
     """Build ClaudeAgentOptions with BAP hooks and Chat MCP tools."""
     tools = make_chat_tools(wrapper)
@@ -536,6 +556,7 @@ def build_agent_options(wrapper: AgentWrapper) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         setting_sources=["project"],
         permission_mode="bypassPermissions",
+        can_use_tool=make_can_use_tool(wrapper),
         mcp_servers={"build_chat": mcp_server},
         hooks={
             "PreToolUse": [HookMatcher(hooks=[make_pre_tool_hook(wrapper)])],
