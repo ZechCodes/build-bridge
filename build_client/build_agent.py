@@ -221,33 +221,39 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
         # --- Interactive tool interception ---
 
         if tool_name == "AskUserQuestion":
-            log.info("AskUserQuestion tool_input: %s", json.dumps(tool_input, default=str)[:1000])
-            # Extract question text — try known field names.
-            question = (
-                tool_input.get("question")
-                or tool_input.get("text")
-                or tool_input.get("prompt")
-                or tool_input.get("body")
-                or tool_input.get("message")
-                or ""
-            )
-            options_raw = tool_input.get("options", [])
-            multi_select = tool_input.get("multiSelect", False)
+            log.info("AskUserQuestion tool_input keys: %s", list(tool_input.keys()))
+            # AskUserQuestion uses "questions" (plural) — an array of question
+            # objects, each with: question, header, options, multiSelect.
+            questions_raw = tool_input.get("questions", [])
+            if not questions_raw:
+                # Fallback: maybe a single question object at top level.
+                questions_raw = [tool_input]
 
-            # Build structured options from the tool's option format.
+            # Build a combined question text and options from all questions.
+            question_parts = []
             options = []
-            for opt in options_raw:
-                if isinstance(opt, dict):
-                    options.append({
-                        "id": opt.get("value", opt.get("id", opt.get("label", ""))),
-                        "label": opt.get("label", opt.get("value", "")),
-                    })
-                elif isinstance(opt, str):
-                    options.append({"id": opt, "label": opt})
+            for q in questions_raw:
+                header = q.get("header", "")
+                qtext = q.get("question", "")
+                if header and qtext:
+                    question_parts.append(f"**{header}**: {qtext}")
+                elif qtext:
+                    question_parts.append(qtext)
 
+                for opt in q.get("options", []):
+                    if isinstance(opt, dict):
+                        label = opt.get("label", "")
+                        desc = opt.get("description", "")
+                        opt_id = label  # Use label as ID since there's no explicit id.
+                        display = f"{label} — {desc}" if desc else label
+                        options.append({"id": opt_id, "label": display})
+                    elif isinstance(opt, str):
+                        options.append({"id": opt, "label": opt})
+
+            question = "\n\n".join(question_parts)
             log.info(
-                "Intercepting AskUserQuestion: question=%r, %d options, multiSelect=%s",
-                question[:80], len(options), multi_select,
+                "Intercepting AskUserQuestion: question=%r, %d options",
+                question[:80], len(options),
             )
             result = await wrapper.request_interaction(
                 interaction_id=f"int_{uuid.uuid4().hex[:16]}",
