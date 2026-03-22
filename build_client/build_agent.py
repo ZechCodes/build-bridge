@@ -264,13 +264,19 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
             )
             if result.get("cancelled") or result.get("timed_out"):
                 return {
-                    "continue_": False,
-                    "systemMessage": "The user did not respond to your question.",
+                    "continue_": True,
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": "The user did not respond to your question in time.",
+                    },
                 }
             answer = result.get("freeform_response") or result.get("selected_option", "")
             return {
-                "continue_": False,
-                "systemMessage": f"The user responded to your question: {answer}",
+                "continue_": True,
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "additionalContext": f"The user has already responded via the remote UI. Their answer: {answer}",
+                },
             }
 
         if tool_name == "ExitPlanMode":
