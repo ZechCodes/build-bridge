@@ -447,7 +447,7 @@ class E2EEHandler:
                         if entry.type == "tool_result":
                             c = data.get("content", "")
                             if isinstance(c, str) and len(c) > self._MAX_RESULT_CONTENT_LEN:
-                                data["content"] = c[:cls._MAX_RESULT_CONTENT_LEN] + "…"
+                                data["content"] = c[:self._MAX_RESULT_CONTENT_LEN] + "…"
                         entries.append({
                             "type": entry.type,
                             "data": data,
