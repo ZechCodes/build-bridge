@@ -260,8 +260,8 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
                 options=options,
                 allow_freeform=True,
             )
-            if result.get("cancelled") or result.get("timed_out"):
-                reason = "User did not respond to your question."
+            if result.get("cancelled"):
+                reason = "Question cancelled — the user sent a new message. Read it with read_unread."
             else:
                 answer = result.get("freeform_response") or result.get("selected_option", "")
                 reason = f"User answered: {answer}"

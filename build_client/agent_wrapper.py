@@ -290,6 +290,10 @@ class AgentWrapper:
         payload = data["payload"]
 
         if msg_type == CHAT_MESSAGE:
+            # Cancel pending interactions so the agent processes the new message.
+            if self._pending_interactions:
+                log.info("New message arrived — cancelling %d pending interaction(s)", len(self._pending_interactions))
+                self.cancel_all_interactions()
             # Queue user message for Chat MCP read_unread.
             content = payload.get("content", "")
             attachments = payload.get("attachments")
@@ -451,12 +455,12 @@ class AgentWrapper:
         options: list[dict[str, Any]] | None = None,
         allow_freeform: bool = True,
         plan: str | None = None,
-        timeout: float = 300.0,
     ) -> dict[str, Any]:
         """Emit interaction request and block until the user responds.
 
+        Blocks indefinitely — the interaction is cancelled only when the user
+        sends a new message, the agent disconnects, or shutdown is requested.
         Returns dict with ``selected_option`` and/or ``freeform_response``.
-        Raises asyncio.TimeoutError if no response within *timeout* seconds.
         """
         event = asyncio.Event()
         result: dict[str, Any] = {}
@@ -466,11 +470,8 @@ class AgentWrapper:
             await self.emit_interaction_request(
                 interaction_id, question, kind, options, allow_freeform, plan,
             )
-            await asyncio.wait_for(event.wait(), timeout=timeout)
+            await event.wait()
             return result
-        except asyncio.TimeoutError:
-            log.warning("Interaction %s timed out after %.0fs", interaction_id[:12], timeout)
-            return {"selected_option": None, "freeform_response": None, "timed_out": True}
         finally:
             self._pending_interactions.pop(interaction_id, None)
 
