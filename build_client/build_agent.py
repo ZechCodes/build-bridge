@@ -269,7 +269,34 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
 
         if tool_name == "ExitPlanMode":
             log.info("Intercepting ExitPlanMode for plan approval")
+            log.info("ExitPlanMode tool_input: %s", json.dumps(tool_input, default=str)[:500])
             await wrapper.emit_state_update(plan_mode=False)
+
+            # Extract plan content from tool_input (injected by normalizeToolInput)
+            # or read from the plan file on disk.
+            plan_content = tool_input.get("plan", "")
+            if not plan_content:
+                # Try to find plan file in .claude/plans/
+                import glob
+                plan_files = sorted(
+                    glob.glob(os.path.join(os.getcwd(), ".claude", "plans", "*.md")),
+                    key=os.path.getmtime,
+                    reverse=True,
+                )
+                if not plan_files:
+                    plan_files = sorted(
+                        glob.glob(os.path.join(os.path.expanduser("~"), ".claude", "plans", "*.md")),
+                        key=os.path.getmtime,
+                        reverse=True,
+                    )
+                if plan_files:
+                    try:
+                        with open(plan_files[0]) as f:
+                            plan_content = f.read()
+                        log.info("Read plan from %s (%d chars)", plan_files[0], len(plan_content))
+                    except Exception as exc:
+                        log.warning("Failed to read plan file: %s", exc)
+
             result = await wrapper.request_interaction(
                 interaction_id=f"int_{uuid.uuid4().hex[:16]}",
                 question="Review and approve the plan?",
@@ -279,6 +306,7 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
                     {"id": "reject", "label": "Reject"},
                 ],
                 allow_freeform=True,
+                plan=plan_content or None,
             )
             if result.get("selected_option") == "approve":
                 return {"continue_": True}
