@@ -247,7 +247,7 @@ class E2EEHandler:
             payload={
                 "action": "channel_list",
                 "channels": [
-                    {"id": c.id, "name": c.name, "created_at": c.created_at}
+                    {"id": c.id, "name": c.name, "created_at": c.created_at, "model": c.model, "harness": c.harness}
                     for c in channels
                 ],
             },
@@ -281,6 +281,8 @@ class E2EEHandler:
                 "id": channel.id,
                 "name": channel.name,
                 "created_at": channel.created_at,
+                "model": channel.model,
+                "harness": channel.harness,
             },
         }
 
