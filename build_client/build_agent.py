@@ -633,22 +633,40 @@ async def run_agent(
 
     next_prompt: str | None = initial_prompt
 
+    # Build recent history summary for context across sessions.
+    def _build_history_context() -> str:
+        if not config or not config.chat_history:
+            return ""
+        # Include the last 20 messages so the agent has conversation context.
+        recent = config.chat_history[-20:]
+        if not recent:
+            return ""
+        lines = ["Recent conversation history:"]
+        for msg in recent:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if len(content) > 300:
+                content = content[:300] + "..."
+            lines.append(f"[{role}] {content}")
+        return "\n".join(lines) + "\n\n"
+
     try:
         # Outer loop: each iteration is a fresh agent context.
         while True:
             options = build_agent_options(wrapper)
 
             async with ClaudeSDKClient(options=options) as client:
-                # Build initial prompt.
+                # Build initial prompt with history context.
+                history_ctx = _build_history_context()
                 if next_prompt:
-                    prompt = chat_context + next_prompt
+                    prompt = chat_context + history_ctx + next_prompt
                 else:
                     # Check for any queued messages from before we connected.
                     if wrapper.chat_mcp.has_unread:
                         notification = wrapper.chat_mcp.build_unread_notification()
-                        prompt = chat_context + (notification or "Check in with the user.")
+                        prompt = chat_context + history_ctx + (notification or "Check in with the user.")
                     else:
-                        prompt = chat_context + "You are online. Check in with the user using the send tool."
+                        prompt = chat_context + history_ctx + "You are online. Check in with the user using the send tool."
                 next_prompt = None
 
                 # Initial query.
