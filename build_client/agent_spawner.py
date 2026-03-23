@@ -21,6 +21,20 @@ from build_client.agent_store import AgentStore
 log = logging.getLogger(__name__)
 
 
+_HARNESS_MODULES: dict[str, str] = {
+    "claude-code": "build_client.build_agent",
+    "codex": "build_client.codex_agent",
+}
+
+
+def runtime_module_for_harness(harness: str) -> str:
+    """Return the runtime entrypoint module for a harness."""
+    try:
+        return _HARNESS_MODULES[harness]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported harness: {harness}") from exc
+
+
 @dataclass
 class WorkerInfo:
     """Tracks a running agent worker process."""
@@ -107,8 +121,9 @@ class AgentSpawner:
             )
 
         # Build the command.
+        runtime_module = runtime_module_for_harness(harness)
         cmd = [
-            sys.executable, "-m", "build_client.build_agent",
+            sys.executable, "-m", runtime_module,
             "--port", str(self._agent_port),
             "--host", self._agent_host,
             "--model", model,

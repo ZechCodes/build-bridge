@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from build_client.agent_spawner import AgentSpawner, WorkerInfo
+from build_client.agent_spawner import AgentSpawner, WorkerInfo, runtime_module_for_harness
 from build_client.agent_store import AgentStore
 
 
@@ -101,6 +101,37 @@ class TestSpawn:
         assert w1.agent_id != w2.agent_id
 
         await spawner.stop_all()
+
+    async def test_spawn_codex_uses_codex_runtime_module(self, spawner, monkeypatch):
+        captured: dict[str, Any] = {}
+
+        class DummyProcess:
+            pid = 12345
+            returncode = None
+            stdout = None
+            stderr = None
+
+            def terminate(self):
+                self.returncode = 0
+
+            def kill(self):
+                self.returncode = -9
+
+            async def wait(self):
+                self.returncode = 0
+                return 0
+
+        async def fake_exec(*cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return DummyProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+        worker = await spawner.spawn("ch_codex", "codex", "gpt-5.4")
+        assert worker.harness == "codex"
+        assert "build_client.codex_agent" in captured["cmd"]
+        await spawner.stop("ch_codex")
 
 
 class TestStop:
@@ -204,3 +235,9 @@ class TestIsRunning:
         await spawner.spawn("ch_stopped", "claude-code", "claude-sonnet-4-20250514")
         await spawner.stop("ch_stopped")
         assert not spawner.is_running("ch_stopped")
+
+
+class TestHarnessRuntimeDispatch:
+    def test_known_harness_modules(self):
+        assert runtime_module_for_harness("claude-code") == "build_client.build_agent"
+        assert runtime_module_for_harness("codex") == "build_client.codex_agent"
