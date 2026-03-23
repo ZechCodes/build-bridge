@@ -233,6 +233,32 @@ class AgentServer:
             log.error("Failed to send interaction.response to agent: %s", exc)
             return False
 
+    async def send_system_instruction(
+        self,
+        channel_id: str,
+        content: str,
+    ) -> bool:
+        """Send an instruction to the agent WITHOUT storing in chat history.
+
+        Used for system-level commands (like plan mode toggle) that should
+        reach the agent but not appear in the user's chat.
+        """
+        agent_id = self._channel_to_agent.get(channel_id)
+        if not agent_id:
+            return False
+        agent = self._agents.get(agent_id)
+        if not agent:
+            return False
+
+        envelope = make_envelope("chat.message", {"role": "system", "content": content})
+        try:
+            await agent.ws.send(json.dumps(envelope))
+            log.info("Sent system instruction to agent %s on channel %s", agent_id[:8], channel_id[:8])
+            return True
+        except Exception as exc:
+            log.error("Failed to send system instruction: %s", exc)
+            return False
+
     def get_channel_for_agent(self, agent_id: str) -> str | None:
         """Get the channel_id for a connected agent."""
         agent = self._agents.get(agent_id)

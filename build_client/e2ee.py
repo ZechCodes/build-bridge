@@ -254,6 +254,7 @@ class E2EEHandler:
                     entry["model"] = agent_ch.model
                     info = get_harness(agent_ch.harness)
                     entry["agent_name"] = info.name if info else "Device"
+                    entry["plan_mode"] = agent_ch.plan_mode
             channel_list.append(entry)
         await self._send_frame(
             session, ws,
@@ -923,14 +924,14 @@ class E2EEHandler:
         if self._agent_server:
             self._agent_server.store.update_plan_mode(channel_id, plan_mode)
 
-        # Inject as chat message instruction to agent.
+        # Send as invisible system instruction (not stored in chat history).
         instruction = (
-            "The user has requested you enter plan mode. Use the EnterPlanMode tool."
+            "[System: The user has activated planning mode. Use /plan to enter plan mode before responding.]"
             if plan_mode else
-            "The user has requested you exit plan mode. Use the ExitPlanMode tool."
+            "[System: The user has deactivated planning mode.]"
         )
         if self._agent_server:
-            await self._agent_server.send_chat_message(channel_id, instruction)
+            await self._agent_server.send_system_instruction(channel_id, instruction)
 
         # Confirm to browser.
         await self._send_frame(session, ws, payload={
