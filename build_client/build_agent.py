@@ -114,8 +114,10 @@ def make_chat_tools(wrapper: AgentWrapper) -> list:
             result = await wrapper.chat_mcp.handle_read_unread()
             messages = result.get("messages", [])
 
-            # Build MCP content blocks — inline images as actual image blocks
-            # so the model can see them natively.
+            # Build MCP content blocks. For images, reference the file path
+            # instead of inlining base64 — Claude Code can read images natively
+            # via its Read tool, and inlining large base64 payloads can exceed
+            # the SDK's stdio buffer limit (~10MB).
             content_blocks: list[dict[str, Any]] = []
             for msg in messages:
                 msg_content = msg.get("content", "")
@@ -125,41 +127,20 @@ def make_chat_tools(wrapper: AgentWrapper) -> list:
                         "text": f"[{msg['role']}] {msg_content}",
                     })
                 elif isinstance(msg_content, list):
-                    # Multimodal content blocks — convert Anthropic image format
-                    # to MCP ImageContent format for the SDK.
                     for block in msg_content:
                         if block.get("type") == "text":
                             content_blocks.append({
                                 "type": "text",
                                 "text": f"[{msg['role']}] {block['text']}",
                             })
-                        elif block.get("type") == "image":
-                            # Convert Anthropic format → MCP format.
-                            # Anthropic: {"type": "image", "source": {"type": "base64", "media_type": "...", "data": "..."}}
-                            # MCP:       {"type": "image", "data": "...", "mimeType": "..."}
-                            source = block.get("source", {})
+                        elif block.get("type") in ("image", "image_url"):
+                            # Instead of inlining base64, tell the agent the file path.
+                            # The ChatMCP already notes file paths for non-image attachments;
+                            # for images, the path is in the attachment metadata.
                             content_blocks.append({
-                                "type": "image",
-                                "data": source.get("data", ""),
-                                "mimeType": source.get("media_type", "image/png"),
+                                "type": "text",
+                                "text": f"[{msg['role']}] [Image attached — use the Read tool to view it]",
                             })
-                        elif block.get("type") == "image_url":
-                            # OpenAI format — extract base64 data from data URL.
-                            image_url = block.get("image_url", {}).get("url", "")
-                            if image_url.startswith("data:"):
-                                # Parse "data:<mime>;base64,<data>"
-                                header, _, b64data = image_url.partition(",")
-                                mime = header.split(";")[0].replace("data:", "")
-                                content_blocks.append({
-                                    "type": "image",
-                                    "data": b64data,
-                                    "mimeType": mime or "image/png",
-                                })
-                            else:
-                                content_blocks.append({
-                                    "type": "text",
-                                    "text": f"[{msg['role']}] [Image: {image_url}]",
-                                })
                         else:
                             content_blocks.append(block)
 

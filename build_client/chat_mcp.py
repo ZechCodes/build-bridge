@@ -10,7 +10,6 @@ Chat MCP calls are NOT reported in the tool.* namespace (§8.4).
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -177,11 +176,12 @@ class ChatMCP:
     def _format_message_content(
         self, msg: UnreadMessage,
     ) -> str | list[dict[str, Any]]:
-        """Format a message's content, inlining image attachments as multimodal blocks.
+        """Format a message's content with attachment references.
 
         If the message has no attachments, returns the plain text content.
-        Otherwise returns a list of content blocks (text + images) formatted
-        for the configured harness (Anthropic or OpenAI style).
+        Otherwise returns a list of content blocks with file path references
+        so the agent can read attachments directly (avoiding base64 inlining
+        which can exceed SDK buffer limits).
         """
         if not msg.attachments:
             return msg.content
@@ -197,14 +197,6 @@ class ChatMCP:
             mime_type = att.get("mime_type", "application/octet-stream")
             filename = att.get("filename", "unknown")
 
-            # Only inline images; describe other file types with a text note.
-            if mime_type not in _IMAGE_MIME_TYPES:
-                blocks.append({
-                    "type": "text",
-                    "text": f"[Attached file: {filename} ({mime_type})]",
-                })
-                continue
-
             if not file_path:
                 blocks.append({
                     "type": "text",
@@ -212,40 +204,23 @@ class ChatMCP:
                 })
                 continue
 
-            # Read and base64-encode the image.
-            try:
-                path = Path(file_path)
-                if not path.exists():
-                    blocks.append({
-                        "type": "text",
-                        "text": f"[Attachment not found: {filename}]",
-                    })
-                    continue
-
-                image_data = base64.standard_b64encode(path.read_bytes()).decode("ascii")
-
-                if self._harness in ("codex",):
-                    # OpenAI format.
-                    data_url = f"data:{mime_type};base64,{image_data}"
-                    blocks.append({
-                        "type": "image_url",
-                        "image_url": {"url": data_url},
-                    })
-                else:
-                    # Anthropic format (claude-code and default).
-                    blocks.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": mime_type,
-                            "data": image_data,
-                        },
-                    })
-            except Exception as exc:
-                log.error("Failed to read attachment %s: %s", file_path, exc)
+            path = Path(file_path)
+            if not path.exists():
                 blocks.append({
                     "type": "text",
-                    "text": f"[Failed to load attachment: {filename}]",
+                    "text": f"[Attachment not found: {filename}]",
+                })
+                continue
+
+            if mime_type in _IMAGE_MIME_TYPES:
+                blocks.append({
+                    "type": "text",
+                    "text": f"[Image: {filename} — read it with: Read {file_path}]",
+                })
+            else:
+                blocks.append({
+                    "type": "text",
+                    "text": f"[Attached file: {filename} ({mime_type}) — path: {file_path}]",
                 })
 
         # If only text blocks resulted, return plain string.
