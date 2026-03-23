@@ -705,6 +705,15 @@ class AgentServer:
         if plan_mode is not None:
             self.store.update_plan_mode(agent.channel_id, plan_mode)
 
+        # Persist read status in E2EE message store.
+        read_ids = payload.get("read_message_ids")
+        if read_ids and self._e2ee_store:
+            for mid in read_ids:
+                try:
+                    self._e2ee_store.mark_read(mid)
+                except Exception:
+                    pass
+
         await self._notify_browser(agent.channel_id, {
             "action": "agent_event",
             "channel_id": agent.channel_id,
