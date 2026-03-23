@@ -36,6 +36,11 @@ class UnreadMessage:
     content: str
     timestamp: str
     attachments: list[dict[str, Any]] | None = None
+    msg_id: str | None = None  # E2EE message ID for read tracking
+
+
+# Callback fired when messages are read by the agent.
+ReadCallback = Callable[[list[str]], Coroutine[Any, Any, None]]
 
 
 class ChatMCP:
@@ -62,11 +67,13 @@ class ChatMCP:
     def __init__(
         self,
         on_send: SendCallback | None = None,
+        on_read: ReadCallback | None = None,
         harness: str = "claude-code",
     ) -> None:
         self._unread: list[UnreadMessage] = []
         self._lock = asyncio.Lock()
         self._on_send = on_send
+        self._on_read = on_read
         self._unread_event = asyncio.Event()
         self._harness = harness
 
@@ -80,6 +87,7 @@ class ChatMCP:
         role: str = "user",
         timestamp: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        msg_id: str | None = None,
     ) -> None:
         """Queue a user message for the agent to read via read_unread.
 
@@ -88,7 +96,8 @@ class ChatMCP:
         ts = timestamp or datetime.now(timezone.utc).isoformat()
         async with self._lock:
             self._unread.append(UnreadMessage(
-                role=role, content=content, timestamp=ts, attachments=attachments,
+                role=role, content=content, timestamp=ts,
+                attachments=attachments, msg_id=msg_id,
             ))
             self._unread_event.set()
         log.debug("Queued message for agent (%d unread)", len(self._unread))
@@ -120,7 +129,8 @@ class ChatMCP:
         """MCP tool: read_unread — return queued user messages.
 
         Returns all unread messages and clears the queue. Subsequent calls
-        return only new messages (§8.1).
+        return only new messages (§8.1). Fires on_read callback with message
+        IDs so the browser can update read status.
         """
         async with self._lock:
             messages = [
@@ -131,11 +141,19 @@ class ChatMCP:
                 }
                 for m in self._unread
             ]
+            read_ids = [m.msg_id for m in self._unread if m.msg_id]
             self._unread.clear()
             self._unread_event.clear()
 
         if messages:
             log.debug("Agent read %d unread messages", len(messages))
+
+        # Notify that messages were read.
+        if read_ids and self._on_read:
+            try:
+                await self._on_read(read_ids)
+            except Exception as exc:
+                log.warning("on_read callback failed: %s", exc)
 
         return {"messages": messages}
 

@@ -126,7 +126,11 @@ class AgentWrapper:
         self._on_shutdown = on_shutdown
 
         # Chat MCP instance — tools share this state.
-        self.chat_mcp = ChatMCP(on_send=self._emit_chat_response, harness=harness)
+        self.chat_mcp = ChatMCP(
+            on_send=self._emit_chat_response,
+            on_read=self._emit_read_notification,
+            harness=harness,
+        )
 
         # Connection state.
         self._ws: Any = None
@@ -297,7 +301,8 @@ class AgentWrapper:
             # Queue user message for Chat MCP read_unread.
             content = payload.get("content", "")
             attachments = payload.get("attachments")
-            await self.chat_mcp.queue_message(content, attachments=attachments)
+            msg_id = data.get("id")  # BAP envelope message ID.
+            await self.chat_mcp.queue_message(content, attachments=attachments, msg_id=msg_id)
             log.debug("Queued user message (%d unread)", self.chat_mcp.unread_count)
 
         elif msg_type == CHAT_CANCEL:
@@ -503,6 +508,14 @@ class AgentWrapper:
         envelope = make_envelope(CHAT_RESPONSE, {"content": message})
         await self._send(envelope)
         log.debug("Emitted chat.response (%d chars)", len(message))
+
+    async def _emit_read_notification(self, message_ids: list[str]) -> None:
+        """Notify that messages were read by the agent (via read_unread)."""
+        envelope = make_envelope(AGENT_STATE_UPDATE, {
+            "read_message_ids": message_ids,
+        })
+        await self._send(envelope)
+        log.debug("Emitted read notification for %d messages", len(message_ids))
 
     async def _send(self, envelope: dict[str, Any]) -> None:
         """Send an envelope to the device client."""

@@ -618,16 +618,9 @@ class E2EEHandler:
         )
         if sent:
             log.info("Forwarded chat message to agent on channel %s", channel_id[:8])
-            # Mark as read now that the agent has received the message.
-            self.store.mark_read(message_id)
-            await self._send_frame(
-                session, ws,
-                payload={
-                    "action": "read",
-                    "message_ids": [message_id],
-                    "channel_id": channel_id,
-                },
-            )
+            # NOTE: Do NOT mark as read here. The message is only "read" when
+            # the agent actually processes it via read_unread. Forwarding to
+            # the agent WebSocket just queues it.
         else:
             log.error(
                 "Failed to send chat message to agent on channel %s "
