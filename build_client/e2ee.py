@@ -242,15 +242,22 @@ class E2EEHandler:
     async def _send_channel_list(self, session: ActiveSession, ws: Any) -> None:
         """Send the list of channels to the browser."""
         channels = self.store.list_channels()
+        channel_list = []
+        for c in channels:
+            entry: dict[str, Any] = {"id": c.id, "name": c.name, "created_at": c.created_at}
+            # Enrich with agent info if available.
+            if self._agent_server:
+                agent_ch = self._agent_server.store.get_channel(c.id)
+                if agent_ch:
+                    from build_client.harness_registry import get_harness
+                    entry["harness"] = agent_ch.harness
+                    entry["model"] = agent_ch.model
+                    info = get_harness(agent_ch.harness)
+                    entry["agent_name"] = info.name if info else "Device"
+            channel_list.append(entry)
         await self._send_frame(
             session, ws,
-            payload={
-                "action": "channel_list",
-                "channels": [
-                    {"id": c.id, "name": c.name, "created_at": c.created_at, "model": c.model, "harness": c.harness}
-                    for c in channels
-                ],
-            },
+            payload={"action": "channel_list", "channels": channel_list},
         )
 
     async def _create_channel(
@@ -281,8 +288,6 @@ class E2EEHandler:
                 "id": channel.id,
                 "name": channel.name,
                 "created_at": channel.created_at,
-                "model": channel.model,
-                "harness": channel.harness,
             },
         }
 
