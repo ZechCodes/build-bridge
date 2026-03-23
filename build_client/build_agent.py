@@ -693,17 +693,6 @@ async def run_agent(
                         break
 
                     if not has_msg:
-                        # Check for buffered plan event even without a user message.
-                        if wrapper.pending_plan_event:
-                            plan_instruction = (
-                                "[System: The user has activated planning mode. Use /plan to enter plan mode before responding.]"
-                                if wrapper.pending_plan_event == "plan:enter" else
-                                "[System: The user has deactivated planning mode.]"
-                            )
-                            wrapper.pending_plan_event = None
-                            await client.query(plan_instruction)
-                            async for message in client.receive_response():
-                                await handle_response_message(message, wrapper)
                         continue
 
                     # Atomically check and build notification to avoid race
