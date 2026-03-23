@@ -1,13 +1,21 @@
 """Harness registry — detects available coding harnesses and their models.
 
-Provides the browser with a list of installable harnesses so users can
-configure channels with the right harness + model combination.
+Loads harness definitions from JSON files in the harnesses/ directory,
+detects which are installed, and provides lookup/serialization for the
+browser UI.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+_HARNESSES_DIR = Path(__file__).parent / "harnesses"
 
 
 @dataclass
@@ -26,52 +34,41 @@ class HarnessInfo:
     id: str
     name: str
     description: str
+    binary: str
     models: list[ModelInfo]
     default_model: str
     installed: bool = False
 
 
-# ---------------------------------------------------------------------------
-# Known harnesses and their models
-# ---------------------------------------------------------------------------
+def _load_harnesses() -> list[HarnessInfo]:
+    """Load harness definitions from JSON files in the harnesses/ directory."""
+    harnesses: list[HarnessInfo] = []
+    if not _HARNESSES_DIR.is_dir():
+        log.warning("Harnesses directory not found: %s", _HARNESSES_DIR)
+        return harnesses
 
-_CLAUDE_CODE_MODELS = [
-    ModelInfo("claude-sonnet-4-6", "Claude Sonnet 4.6", "anthropic"),
-    ModelInfo("claude-opus-4-6", "Claude Opus 4.6", "anthropic"),
-    ModelInfo("claude-haiku-4-5", "Claude Haiku 4.5", "anthropic"),
-    # Legacy models still available.
-    ModelInfo("claude-sonnet-4-5", "Claude Sonnet 4.5", "anthropic"),
-    ModelInfo("claude-opus-4-5", "Claude Opus 4.5", "anthropic"),
-]
+    for path in sorted(_HARNESSES_DIR.glob("*.json")):
+        try:
+            data = json.loads(path.read_text())
+            models = [
+                ModelInfo(id=m["id"], name=m["name"], provider=m["provider"])
+                for m in data.get("models", [])
+            ]
+            harnesses.append(HarnessInfo(
+                id=data["id"],
+                name=data["name"],
+                description=data.get("description", ""),
+                binary=data.get("binary", ""),
+                models=models,
+                default_model=data.get("default_model", models[0].id if models else ""),
+            ))
+        except Exception as exc:
+            log.warning("Failed to load harness from %s: %s", path, exc)
 
-_CODEX_MODELS = [
-    ModelInfo("o4-mini", "o4-mini", "openai"),
-    ModelInfo("o3", "o3", "openai"),
-    ModelInfo("codex-mini-latest", "Codex Mini", "openai"),
-]
+    return harnesses
 
-KNOWN_HARNESSES: list[HarnessInfo] = [
-    HarnessInfo(
-        id="claude-code",
-        name="Claude Code",
-        description="Anthropic's agentic coding tool with planning, tool use, and MCP support.",
-        models=_CLAUDE_CODE_MODELS,
-        default_model="claude-sonnet-4-6",
-    ),
-    HarnessInfo(
-        id="codex",
-        name="Codex CLI",
-        description="OpenAI's open-source coding agent.",
-        models=_CODEX_MODELS,
-        default_model="codex-mini-latest",
-    ),
-]
 
-# Maps harness id → binary name to check on PATH.
-_HARNESS_BINARIES: dict[str, str] = {
-    "claude-code": "claude",
-    "codex": "codex",
-}
+KNOWN_HARNESSES: list[HarnessInfo] = _load_harnesses()
 
 
 # ---------------------------------------------------------------------------
@@ -87,12 +84,12 @@ def detect_installed() -> list[HarnessInfo]:
     """
     result = []
     for harness in KNOWN_HARNESSES:
-        binary = _HARNESS_BINARIES.get(harness.id)
-        installed = shutil.which(binary) is not None if binary else False
+        installed = shutil.which(harness.binary) is not None if harness.binary else False
         result.append(HarnessInfo(
             id=harness.id,
             name=harness.name,
             description=harness.description,
+            binary=harness.binary,
             models=harness.models,
             default_model=harness.default_model,
             installed=installed,

@@ -85,6 +85,7 @@ class TestSerializeHarnesses:
                 id="test",
                 name="Test Harness",
                 description="A test harness",
+                binary="test-bin",
                 models=[ModelInfo("m1", "Model 1", "test-provider")],
                 default_model="m1",
                 installed=True,
