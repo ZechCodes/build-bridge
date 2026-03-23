@@ -485,6 +485,13 @@ class AgentServer:
     # Message handlers
     # -----------------------------------------------------------------
 
+    @staticmethod
+    def _agent_display_name(agent: AgentConnection) -> str:
+        """Get the display name for an agent (e.g., 'Claude Code')."""
+        from build_client.harness_registry import get_harness
+        info = get_harness(agent.harness)
+        return info.name if info else "Device"
+
     async def _handle_chat_response(
         self, agent: AgentConnection, data: dict[str, Any],
     ) -> None:
@@ -506,6 +513,7 @@ class AgentServer:
                 "id": data["id"],
                 "ref": data.get("ref"),
                 "content": content,
+                "sender": self._agent_display_name(agent),
             },
         })
 
@@ -688,12 +696,13 @@ class AgentServer:
             interaction_id, agent.channel_id, question, kind, options, allow_freeform, plan,
         )
 
-        # Broadcast to browser.
+        # Broadcast to browser (include sender name).
+        event = {**payload, "sender": self._agent_display_name(agent)}
         await self._notify_browser(agent.channel_id, {
             "action": "agent_event",
             "channel_id": agent.channel_id,
             "event_type": "interaction.request",
-            "event": payload,
+            "event": event,
         })
 
     async def _handle_state_update(
