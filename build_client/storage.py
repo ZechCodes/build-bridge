@@ -185,5 +185,27 @@ class MessageStore:
             for r in reversed(rows)  # Return in chronological order
         ]
 
+    def get_unread_messages(self, channel_id: str) -> list[Message]:
+        """Get unread client messages on a channel (read_at IS NULL, sender='client')."""
+        rows = self.db.execute(
+            "SELECT * FROM messages WHERE channel_id = ? AND sender = 'client' "
+            "AND read_at IS NULL ORDER BY created_at ASC",
+            (channel_id,),
+        ).fetchall()
+        return [
+            Message(
+                id=r["id"],
+                channel_id=r["channel_id"],
+                session_id=r["session_id"],
+                sender=r["sender"],
+                content=r["content"],
+                created_at=r["created_at"],
+                delivered_at=r["delivered_at"],
+                read_at=r["read_at"],
+                attachments=json.loads(r["attachments"]) if r["attachments"] else None,
+            )
+            for r in rows
+        ]
+
     def close(self) -> None:
         self.db.close()

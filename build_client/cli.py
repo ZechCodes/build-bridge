@@ -55,6 +55,7 @@ async def async_main(base_url: str, reset: bool = False, agent_port: int = DEFAU
         store=agent_store,
         broadcast=handler.broadcast_to_sessions,
         port=agent_port,
+        e2ee_store=store,
     )
 
     # Initialize agent spawner for managing agent worker processes.

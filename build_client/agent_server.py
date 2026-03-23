@@ -92,9 +92,11 @@ class AgentServer:
         broadcast: BroadcastCallback | None = None,
         host: str = "127.0.0.1",
         port: int = DEFAULT_AGENT_PORT,
+        e2ee_store: Any = None,
     ) -> None:
         self.store = store
         self._broadcast = broadcast
+        self._e2ee_store = e2ee_store  # MessageStore for checking unread messages
         self._host = host
         self._port = port
         self._agents: dict[str, AgentConnection] = {}  # agent_id -> connection
@@ -410,6 +412,23 @@ class AgentServer:
             ref=data["id"],
         )
         await ws.send(json.dumps(configured))
+
+        # Forward any unread E2EE messages to the agent so it can process
+        # messages that arrived while no agent was running.
+        if self._e2ee_store:
+            try:
+                unread = self._e2ee_store.get_unread_messages(channel.id)
+                if unread:
+                    log.info("Forwarding %d unread message(s) to agent on channel %s", len(unread), channel.id[:8])
+                    for msg in unread:
+                        chat_msg = make_envelope("chat.message", {
+                            "role": "user",
+                            "content": msg.content,
+                        }, msg_id=msg.id)
+                        await ws.send(json.dumps(chat_msg))
+            except Exception as exc:
+                log.warning("Failed to forward unread messages: %s", exc)
+
         return agent
 
     # -----------------------------------------------------------------
