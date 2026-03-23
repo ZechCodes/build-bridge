@@ -130,7 +130,9 @@ class AgentSpawner:
             "--agent-id", agent_id,
         ]
         if working_directory:
-            cmd.extend(["--working-directory", working_directory])
+            # Expand ~ and env vars so the agent subprocess gets a real path.
+            resolved_wd = os.path.expanduser(os.path.expandvars(working_directory))
+            cmd.extend(["--working-directory", resolved_wd])
 
         # Set up environment.
         env = os.environ.copy()
