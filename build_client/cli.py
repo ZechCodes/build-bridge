@@ -1,10 +1,14 @@
 """CLI entry point for the Build device client.
 
 Usage:
-    build-device                 # Run with default settings
-    build-device --url https://getbuild.ing
-    build-device --reset         # Re-run auth flow
-    build-device --agent-port 9783  # Custom agent server port
+    build-device                     # Start the daemon
+    build-device start               # Same as above
+    build-device stop [--keep-agents]  # Stop the daemon
+    build-device restart             # Restart the daemon
+    build-device status              # Show daemon status
+    build-device agents              # List running agents
+    build-device agent-stop <ch>     # Stop an agent
+    build-device agent-restart <ch>  # Restart an agent
 """
 
 from __future__ import annotations
@@ -14,15 +18,19 @@ import asyncio
 import logging
 import os
 import sys
+from typing import TYPE_CHECKING
 
 from build_client.agent_server import AgentServer, DEFAULT_AGENT_PORT
 from build_client.agent_spawner import AgentSpawner
 from build_client.agent_store import AgentStore
 from build_client.auth import device_auth_flow
-from build_client.config import DEFAULT_CONFIG_PATH, load_config
+from build_client.config import load_config
 from build_client.e2ee import E2EEHandler
 from build_client.storage import MessageStore
 from build_client.ws import run_connection
+
+if TYPE_CHECKING:
+    from build_client.daemon import DaemonContext
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,7 +41,12 @@ log = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://getbuild.ing"
 
 
-async def async_main(base_url: str, reset: bool = False, agent_port: int = DEFAULT_AGENT_PORT) -> None:
+async def async_main(
+    base_url: str,
+    reset: bool = False,
+    agent_port: int = DEFAULT_AGENT_PORT,
+    daemon_ctx: DaemonContext | None = None,
+) -> None:
     """Main async entry point."""
     config = None if reset else load_config()
 
@@ -68,6 +81,12 @@ async def async_main(base_url: str, reset: bool = False, agent_port: int = DEFAU
     handler.set_agent_server(agent_server)
     handler.set_agent_spawner(agent_spawner)
 
+    # Populate daemon context if running under the process manager.
+    if daemon_ctx:
+        daemon_ctx.agent_spawner = agent_spawner
+        daemon_ctx.agent_server = agent_server
+        daemon_ctx.agent_store = agent_store
+
     try:
         # Start the local agent WS server.
         await agent_server.start()
@@ -89,12 +108,34 @@ async def async_main(base_url: str, reset: bool = False, agent_port: int = DEFAU
                 except Exception as exc:
                     log.error("Failed to re-spawn agent on channel %s: %s", ch.id[:8], exc)
 
-        # Run the relay connection (blocking reconnect loop).
-        await run_connection(config, e2e_handler=handler.handle_message)
+        # Run the relay connection. If running under the daemon, make it
+        # interruptible via the shutdown event.
+        if daemon_ctx:
+            relay_task = asyncio.create_task(
+                run_connection(config, e2e_handler=handler.handle_message)
+            )
+            shutdown_task = asyncio.create_task(daemon_ctx.shutdown_event.wait())
+            done, pending = await asyncio.wait(
+                [relay_task, shutdown_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+        else:
+            await run_connection(config, e2e_handler=handler.handle_message)
+
     except KeyboardInterrupt:
         pass
     finally:
-        await agent_spawner.stop_all()
+        keep_agents = daemon_ctx.keep_agents_on_stop if daemon_ctx else False
+        if not keep_agents:
+            await agent_spawner.stop_all()
+        else:
+            log.info("Keeping agents running (--keep-agents)")
         await agent_server.stop()
         agent_store.close()
         store.close()
@@ -102,32 +143,187 @@ async def async_main(base_url: str, reset: bool = False, agent_port: int = DEFAU
     log.info("Disconnected.")
 
 
+# ---------------------------------------------------------------------------
+# CLI entry point — subcommand dispatcher
+# ---------------------------------------------------------------------------
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build device client — connects to the Build server.",
+        description="Build device client — manages the local device daemon.",
     )
-    parser.add_argument(
+    sub = parser.add_subparsers(dest="command")
+
+    # start (also default when no subcommand given)
+    p_start = sub.add_parser("start", help="Start the device client daemon")
+    p_start.add_argument(
         "--url",
         default=os.environ.get("BUILD_URL", DEFAULT_BASE_URL),
-        help=f"Build server URL (default: {DEFAULT_BASE_URL}, or $BUILD_URL)",
+        help=f"Build server URL (default: {DEFAULT_BASE_URL})",
     )
-    parser.add_argument(
-        "--reset",
-        action="store_true",
-        help="Re-run the device authorization flow (discard saved config).",
-    )
-    parser.add_argument(
-        "--agent-port",
-        type=int,
+    p_start.add_argument("--reset", action="store_true", help="Re-run device auth")
+    p_start.add_argument(
+        "--agent-port", type=int,
         default=int(os.environ.get("BUILD_AGENT_PORT", str(DEFAULT_AGENT_PORT))),
-        help=f"Port for the local agent WebSocket server (default: {DEFAULT_AGENT_PORT})",
+        help=f"Agent WebSocket port (default: {DEFAULT_AGENT_PORT})",
     )
+    p_start.add_argument(
+        "--no-watchdog", action="store_true",
+        help="Run without crash recovery watchdog",
+    )
+
+    # stop
+    p_stop = sub.add_parser("stop", help="Stop the daemon")
+    p_stop.add_argument(
+        "--keep-agents", action="store_true",
+        help="Keep agent processes running after stopping the daemon",
+    )
+
+    # restart
+    p_restart = sub.add_parser("restart", help="Restart the daemon")
+    p_restart.add_argument("--keep-agents", action="store_true")
+
+    # status
+    sub.add_parser("status", help="Show daemon status")
+
+    # agents
+    sub.add_parser("agents", help="List running agents")
+
+    # agent-stop
+    p_as = sub.add_parser("agent-stop", help="Stop an agent")
+    p_as.add_argument("channel", help="Channel ID (or prefix)")
+
+    # agent-restart
+    p_ar = sub.add_parser("agent-restart", help="Restart an agent")
+    p_ar.add_argument("channel", help="Channel ID (or prefix)")
+
     args = parser.parse_args()
+    command = args.command
+
+    # Default to start when no subcommand given.
+    if command is None:
+        # Check for legacy flags on the bare command.
+        args.url = os.environ.get("BUILD_URL", DEFAULT_BASE_URL)
+        args.reset = False
+        args.agent_port = int(os.environ.get("BUILD_AGENT_PORT", str(DEFAULT_AGENT_PORT)))
+        args.no_watchdog = False
+        command = "start"
+
+    if command == "start":
+        _cmd_start(args)
+    elif command == "stop":
+        _cmd_stop(args)
+    elif command == "restart":
+        _cmd_restart(args)
+    elif command == "status":
+        _cmd_status()
+    elif command == "agents":
+        _cmd_agents()
+    elif command == "agent-stop":
+        _cmd_agent_control("agent_stop", args.channel)
+    elif command == "agent-restart":
+        _cmd_agent_control("agent_restart", args.channel)
+
+
+def _cmd_start(args: argparse.Namespace) -> None:
+    from build_client.daemon import main_with_watchdog, run_daemon
+    from build_client.ctl import is_running
+
+    running, pid = is_running()
+    if running:
+        print(f"Daemon is already running (PID {pid}).")
+        sys.exit(1)
 
     try:
-        asyncio.run(async_main(args.url, reset=args.reset, agent_port=args.agent_port))
+        if args.no_watchdog:
+            asyncio.run(run_daemon(args.url, reset=args.reset, agent_port=args.agent_port))
+        else:
+            asyncio.run(main_with_watchdog(args.url, reset=args.reset, agent_port=args.agent_port))
     except KeyboardInterrupt:
         pass
+
+
+def _cmd_stop(args: argparse.Namespace) -> None:
+    from build_client.ctl import send_command, is_running, print_not_running
+
+    running, pid = is_running()
+    if not running:
+        print_not_running()
+
+    kill_agents = not getattr(args, "keep_agents", False)
+    print(f"Stopping daemon (PID {pid})...", end=" ", flush=True)
+    try:
+        send_command({"cmd": "stop", "kill_agents": kill_agents})
+        print("done.")
+    except ConnectionError:
+        print("failed (connection lost).")
+        sys.exit(1)
+
+
+def _cmd_restart(args: argparse.Namespace) -> None:
+    from build_client.ctl import send_command, is_running, print_not_running
+
+    running, pid = is_running()
+    if not running:
+        print_not_running()
+
+    kill_agents = not getattr(args, "keep_agents", False)
+    print(f"Restarting daemon (PID {pid})...", end=" ", flush=True)
+    try:
+        send_command({"cmd": "stop", "kill_agents": kill_agents, "restart": True})
+        print("done.")
+    except ConnectionError:
+        print("failed (connection lost).")
+        sys.exit(1)
+
+
+def _cmd_status() -> None:
+    from build_client.ctl import send_command, is_running, print_status, print_not_running
+
+    running, pid = is_running()
+    if not running:
+        print("Build device client: not running")
+        return
+
+    try:
+        resp = send_command({"cmd": "status"})
+        if resp.get("ok"):
+            print_status(resp)
+        else:
+            print(f"Error: {resp.get('error')}")
+    except ConnectionError:
+        print(f"Build device client: running (PID {pid}) but not responding")
+
+
+def _cmd_agents() -> None:
+    from build_client.ctl import send_command, print_agents, print_not_running
+
+    try:
+        resp = send_command({"cmd": "agents"})
+        if resp.get("ok"):
+            print_agents(resp)
+        else:
+            print(f"Error: {resp.get('error')}")
+    except ConnectionError:
+        print_not_running()
+
+
+def _cmd_agent_control(cmd: str, channel: str) -> None:
+    from build_client.ctl import send_command, print_not_running
+
+    try:
+        resp = send_command({"cmd": cmd, "channel": channel})
+        if resp.get("ok"):
+            if cmd == "agent_restart":
+                agent = resp.get("agent", {})
+                print(f"Restarted agent on channel {channel[:8]} (PID {agent.get('pid')})")
+            else:
+                print(f"Stopped agent on channel {channel[:8]}")
+        else:
+            print(f"Error: {resp.get('error')}")
+            sys.exit(1)
+    except ConnectionError:
+        print_not_running()
 
 
 if __name__ == "__main__":
