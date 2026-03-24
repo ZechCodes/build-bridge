@@ -111,6 +111,7 @@ async def async_main(
         # Run the relay connection. If running under the daemon, make it
         # interruptible via the shutdown event.
         if daemon_ctx:
+            daemon_ctx.relay_connected = True  # run_connection auto-reconnects.
             relay_task = asyncio.create_task(
                 run_connection(config, e2e_handler=handler.handle_message)
             )
