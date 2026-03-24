@@ -344,21 +344,6 @@ class CodexHarnessRuntime:
     async def _next_notification_text(self, timeout: float) -> str | None:
         parts: list[str] = []
 
-        if self.wrapper.pending_plan_event:
-            event = self.wrapper.pending_plan_event
-            self.wrapper.pending_plan_event = None
-            if event == "plan:enter":
-                self.plan_mode = True
-                await self.wrapper.emit_state_update(plan_mode=True)
-                parts.append(
-                    "[System: The user activated planning mode. Do not make changes yet. "
-                    "Produce or update a concrete plan, then wait for approval.]"
-                )
-            elif event == "plan:exit":
-                self.plan_mode = False
-                await self.wrapper.emit_state_update(plan_mode=False)
-                parts.append("[System: The user deactivated planning mode.]")
-
         # Check if previously notified unread messages have been drained.
         if self._unread_notified and not self.wrapper.chat_mcp.has_unread:
             self._unread_notified = False

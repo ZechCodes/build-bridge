@@ -230,8 +230,6 @@ class E2EEHandler:
             await self._send_worker_list(session, ws)
         elif action == "interaction_response":
             await self._handle_interaction_response(session, payload, ws)
-        elif action == "set_plan_mode":
-            await self._handle_set_plan_mode(session, payload, ws)
         elif action == "upload_chunk":
             await self._handle_upload_chunk(session, payload, ws)
         elif action == "upload_complete":
@@ -550,6 +548,7 @@ class E2EEHandler:
         message_id = frame.get("message_id")
         channel_id = payload.get("channel_id", "")
         content = payload.get("content", "")
+        plan_mode = payload.get("plan_mode")
         attachments = payload.get("attachments")  # list[{file_id, filename, size, mime_type}] or None
 
         if not channel_id or (not content and not attachments):
@@ -620,8 +619,18 @@ class E2EEHandler:
                 )
                 enriched_attachments.append({**att, "path": str(file_path)})
 
+        # Prepend plan mode instruction if the browser sent plan_mode flag.
+        forwarded_content = content
+        if plan_mode:
+            forwarded_content = (
+                "[System: The user has planning mode active. Plan before executing. "
+                "Use EnterPlanMode if not already in plan mode.]\n\n" + content
+            )
+            if self._agent_server:
+                self._agent_server.store.update_plan_mode(channel_id, True)
+
         sent = await self._agent_server.send_chat_message(
-            channel_id, content, msg_id=message_id,
+            channel_id, forwarded_content, msg_id=message_id,
             attachments=enriched_attachments,
         )
         if sent:
@@ -906,39 +915,6 @@ class E2EEHandler:
                     session, ws, channel_id,
                     "Failed to send response to agent. The agent may have disconnected.",
                 )
-
-    async def _handle_set_plan_mode(
-        self,
-        session: ActiveSession,
-        payload: dict[str, Any],
-        ws: Any,
-    ) -> None:
-        """Toggle plan mode — inject instruction to agent as chat message."""
-        channel_id = payload.get("channel_id", "")
-        plan_mode = payload.get("plan_mode", False)
-
-        if not channel_id:
-            return
-
-        # Update store.
-        if self._agent_server:
-            self._agent_server.store.update_plan_mode(channel_id, plan_mode)
-
-        # Send as invisible system instruction (not stored in chat history).
-        instruction = (
-            "[System: The user has activated planning mode. Use /plan to enter plan mode before responding.]"
-            if plan_mode else
-            "[System: The user has deactivated planning mode.]"
-        )
-        if self._agent_server:
-            await self._agent_server.send_system_instruction(channel_id, instruction)
-
-        # Confirm to browser.
-        await self._send_frame(session, ws, payload={
-            "action": "plan_mode_updated",
-            "channel_id": channel_id,
-            "plan_mode": plan_mode,
-        })
 
     # ---- File Upload Handling ----
 

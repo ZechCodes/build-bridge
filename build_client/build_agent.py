@@ -699,14 +699,6 @@ async def run_agent(
                     # with concurrent handle_read_unread draining the queue.
                     notification = await wrapper.chat_mcp.drain_unread_notification()
                     if notification:
-                        # Inject buffered plan mode instruction if pending.
-                        if wrapper.pending_plan_event:
-                            if wrapper.pending_plan_event == "plan:enter":
-                                notification += "\n\n[System: The user has activated planning mode. Use /plan to enter plan mode before responding.]"
-                            elif wrapper.pending_plan_event == "plan:exit":
-                                notification += "\n\n[System: The user has deactivated planning mode.]"
-                            wrapper.pending_plan_event = None
-
                         await client.query(notification)
                         async for message in client.receive_response():
                             await handle_response_message(message, wrapper)

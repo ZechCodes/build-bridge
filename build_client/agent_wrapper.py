@@ -142,9 +142,6 @@ class AgentWrapper:
         # Pending interactions — interaction_id -> (Event, result_dict).
         self._pending_interactions: dict[str, tuple[asyncio.Event, dict[str, Any]]] = {}
 
-        # Buffered plan mode event — injected into next query prompt.
-        self.pending_plan_event: str | None = None
-
     # -----------------------------------------------------------------
     # Properties
     # -----------------------------------------------------------------
@@ -297,21 +294,7 @@ class AgentWrapper:
         payload = data["payload"]
 
         if msg_type == CHAT_MESSAGE:
-            role = payload.get("role", "user")
             content = payload.get("content", "")
-
-            # System instructions (e.g., plan mode toggle) — buffer, don't queue as chat.
-            if role == "system":
-                if "[System:" in content and "planning mode" in content:
-                    if "activated" in content:
-                        self.pending_plan_event = "plan:enter"
-                    elif "deactivated" in content:
-                        self.pending_plan_event = "plan:exit"
-                    log.info("Buffered plan event: %s", self.pending_plan_event)
-                else:
-                    # Generic system instruction — queue as a message.
-                    await self.chat_mcp.queue_message(content)
-                return
 
             # Cancel pending interactions so the agent processes the new message.
             if self._pending_interactions:
