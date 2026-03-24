@@ -16,7 +16,7 @@ dependencies = [
 build-secure-transport = { path = "../build-secure-transport/python" }
 
 [project.scripts]
-build-device = "build_client.cli:main"
+build = "build_client.cli:main"
 build-agent = "build_client.build_agent:main"
 
 [dependency-groups]
