@@ -359,15 +359,22 @@ class CodexHarnessRuntime:
                 await self.wrapper.emit_state_update(plan_mode=False)
                 parts.append("[System: The user deactivated planning mode.]")
 
-        has_unread = await self.wrapper.chat_mcp.wait_for_unread(timeout=timeout)
-        if has_unread:
-            if not self._unread_notified:
+        if self._unread_notified:
+            # Already notified about unread messages — wait for the queue to drain
+            # (agent reads via MCP) before checking for new messages.
+            if not self.wrapper.chat_mcp.has_unread:
+                self._unread_notified = False
+            # Don't busy-wait; sleep if we have nothing else to report.
+            if not parts:
+                await asyncio.sleep(timeout)
+                return None
+        else:
+            has_unread = await self.wrapper.chat_mcp.wait_for_unread(timeout=timeout)
+            if has_unread:
                 unread = await self.wrapper.chat_mcp.drain_unread_notification()
                 if unread:
                     parts.append(unread)
                     self._unread_notified = True
-        else:
-            self._unread_notified = False
 
         text = "\n\n".join(part for part in parts if part).strip()
         return text or None
