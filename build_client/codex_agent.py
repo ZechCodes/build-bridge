@@ -560,16 +560,25 @@ class CodexHarnessRuntime:
         log.error("Codex app-server error: %s", message)
 
     async def _on_command_approval(self, _request_id: str | int, params: dict[str, Any]) -> dict[str, Any]:
-        command = params.get("command") or "Execute command?"
-        reason = params.get("reason")
-        question = command if not reason else f"{command}\n\nReason: {reason}"
+        log.info("Command approval params: %s", json.dumps(params, default=str)[:500])
+        command = params.get("command") or ""
+        reason = params.get("reason") or ""
+        cwd = params.get("cwd") or ""
+        parts = ["**Run command?**"]
+        if command:
+            parts.append(f"```\n{command}\n```")
+        if cwd:
+            parts.append(f"Working directory: `{cwd}`")
+        if reason:
+            parts.append(f"Reason: {reason}")
+        question = "\n\n".join(parts)
         result = await self.wrapper.request_interaction(
             interaction_id=f"int_{uuid.uuid4().hex[:16]}",
             question=question,
             kind="approval",
             options=[
                 {"id": "accept", "label": "Approve"},
-                {"id": "acceptForSession", "label": "Approve for Session"},
+                {"id": "acceptForSession", "label": "Always Approve"},
                 {"id": "decline", "label": "Reject"},
             ],
             allow_freeform=False,
@@ -577,14 +586,28 @@ class CodexHarnessRuntime:
         return {"decision": result.get("selected_option") or "decline"}
 
     async def _on_file_change_approval(self, _request_id: str | int, params: dict[str, Any]) -> dict[str, Any]:
-        question = params.get("reason") or "Approve file changes?"
+        log.info("File change approval params: %s", json.dumps(params, default=str)[:1000])
+        reason = params.get("reason") or ""
+        changes = params.get("changes") or []
+        parts = ["**Approve file changes?**"]
+        if reason:
+            parts.append(reason)
+        for change in changes[:10]:  # Limit to 10 files.
+            path = change.get("filePath") or change.get("path") or ""
+            diff = change.get("diff") or change.get("patch") or ""
+            if path:
+                if diff:
+                    parts.append(f"`{path}`\n```diff\n{diff[:500]}\n```")
+                else:
+                    parts.append(f"`{path}`")
+        question = "\n\n".join(parts)
         result = await self.wrapper.request_interaction(
             interaction_id=f"int_{uuid.uuid4().hex[:16]}",
             question=question,
             kind="approval",
             options=[
                 {"id": "accept", "label": "Approve"},
-                {"id": "acceptForSession", "label": "Approve for Session"},
+                {"id": "acceptForSession", "label": "Always Approve"},
                 {"id": "decline", "label": "Reject"},
             ],
             allow_freeform=False,
@@ -592,6 +615,7 @@ class CodexHarnessRuntime:
         return {"decision": result.get("selected_option") or "decline"}
 
     async def _on_permissions_approval(self, _request_id: str | int, params: dict[str, Any]) -> dict[str, Any]:
+        log.info("Permissions approval params: %s", json.dumps(params, default=str)[:500])
         question = params.get("reason") or "Approve requested permissions?"
         result = await self.wrapper.request_interaction(
             interaction_id=f"int_{uuid.uuid4().hex[:16]}",
