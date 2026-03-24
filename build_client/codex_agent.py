@@ -21,6 +21,15 @@ from build_client.build_chat_bridge import BuildChatBridgeServer
 from build_client.codex_app_server import CodexAppServerClient, CodexAppServerError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# Also log to a file for debugging (spawner truncates stderr).
+try:
+    _log_dir = Path.home() / ".config" / "build" / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _fh = logging.FileHandler(_log_dir / "codex_agent.log")
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logging.getLogger().addHandler(_fh)
+except Exception:
+    pass
 log = logging.getLogger(__name__)
 
 CHAT_CONTEXT = (
@@ -243,9 +252,13 @@ class CodexHarnessRuntime:
 
     async def run(self) -> None:
         self._register_handlers()
+        log.info("Starting Codex app-server...")
         await self.client.start()
+        log.info("Codex app-server started, initializing...")
         await self.client.initialize(client_name="build-client", client_version="0.1.0")
+        log.info("Codex app-server initialized")
 
+        log.info("Starting Codex thread...")
         thread = await self.client.send_request("thread/start", {
             "cwd": self.working_directory,
             "model": self.model,
@@ -698,13 +711,16 @@ async def run_agent(
             working_directory=workdir,
         )
 
+        log.info("Starting Codex runtime...")
         run_task = asyncio.create_task(runtime.run())
         while not run_task.done():
             if cancel_event.is_set() and runtime:
                 runtime.cancel()
                 cancel_event.clear()
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
+        log.info("Codex runtime exited, collecting result...")
         await run_task
+        log.info("Codex runtime completed")
 
     except Exception as exc:
         log.error("Codex agent error: %s", exc, exc_info=True)
@@ -715,21 +731,27 @@ async def run_agent(
         except Exception:
             pass
     finally:
-        if runtime:
-            await runtime.shutdown()
-        if receive_task:
-            receive_task.cancel()
-            try:
-                await receive_task
-            except asyncio.CancelledError:
-                pass
-        if bridge:
-            await bridge.stop()
+        log.info("Codex agent shutting down, cleaning up...")
+        try:
+            async with asyncio.timeout(10):
+                if runtime:
+                    await runtime.shutdown()
+                if receive_task:
+                    receive_task.cancel()
+                    try:
+                        await receive_task
+                    except asyncio.CancelledError:
+                        pass
+                if bridge:
+                    await bridge.stop()
+        except TimeoutError:
+            log.warning("Cleanup timed out after 10s")
         if runtime_home:
             shutil.rmtree(runtime_home, ignore_errors=True)
         if bridge_dir:
             shutil.rmtree(bridge_dir, ignore_errors=True)
         await wrapper.disconnect("completed")
+        log.info("Codex agent stopped")
 
 
 def main() -> None:

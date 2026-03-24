@@ -162,6 +162,7 @@ class CodexAppServerClient:
                     log.debug("Ignoring non-JSON app-server stdout line: %s", line)
                     continue
 
+                log.info("App-server message: id=%s method=%s", message.get("id"), message.get("method", "(response)"))
                 await self._handle_message(message)
         finally:
             self._fail_pending(CodexAppServerError("Codex app-server stdout closed"))
