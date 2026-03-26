@@ -157,8 +157,9 @@ async def async_main(
         pass
     finally:
         keep_agents = daemon_ctx.keep_agents_on_stop if daemon_ctx else False
+        restarting = daemon_ctx.restart_requested if daemon_ctx else False
         if not keep_agents:
-            await agent_spawner.stop_all()
+            await agent_spawner.stop_all(resumable=restarting)
         else:
             log.info("Keeping agents running (--keep-agents)")
         await agent_server.stop()

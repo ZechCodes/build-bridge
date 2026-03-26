@@ -193,8 +193,12 @@ class AgentSpawner:
     # Stop
     # -----------------------------------------------------------------
 
-    async def stop(self, channel_id: str) -> bool:
-        """Stop the agent process on a channel. Returns True if stopped."""
+    async def stop(self, channel_id: str, *, resumable: bool = False) -> bool:
+        """Stop the agent process on a channel.
+
+        If *resumable* is True, the channel is set to 'idle' so it will be
+        re-spawned on the next startup. Otherwise it's set to 'closed'.
+        """
         worker = self._workers.pop(channel_id, None)
         if not worker:
             return False
@@ -222,15 +226,19 @@ class AgentSpawner:
                 pass
 
         # Update channel status.
-        self._store.update_channel_status(channel_id, "closed")
+        self._store.update_channel_status(channel_id, "idle" if resumable else "closed")
 
         return True
 
-    async def stop_all(self) -> None:
-        """Stop all running agent processes."""
+    async def stop_all(self, *, resumable: bool = False) -> None:
+        """Stop all running agent processes.
+
+        If *resumable* is True, channels are set to 'idle' so agents will be
+        re-spawned on the next startup (used during daemon restart).
+        """
         channel_ids = list(self._workers.keys())
         for channel_id in channel_ids:
-            await self.stop(channel_id)
+            await self.stop(channel_id, resumable=resumable)
 
     # -----------------------------------------------------------------
     # Restart
