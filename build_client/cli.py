@@ -18,6 +18,7 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from build_client.agent_server import AgentServer, DEFAULT_AGENT_PORT
@@ -33,9 +34,27 @@ from build_client.ws import run_connection
 if TYPE_CHECKING:
     from build_client.daemon import DaemonContext
 
+LOG_DIR = Path.home() / ".config" / "build" / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+_log_formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+
+# Console handler (existing behavior).
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_log_formatter)
+
+# Rotating file handler — device client logs.
+from logging.handlers import RotatingFileHandler
+_file_handler = RotatingFileHandler(
+    LOG_DIR / "device.log",
+    maxBytes=5 * 1024 * 1024,  # 5 MB
+    backupCount=3,
+)
+_file_handler.setFormatter(_log_formatter)
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[_console_handler, _file_handler],
 )
 log = logging.getLogger(__name__)
 
