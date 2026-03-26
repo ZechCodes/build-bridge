@@ -234,6 +234,8 @@ class E2EEHandler:
             await self._handle_upload_chunk(session, payload, ws)
         elif action == "upload_complete":
             await self._handle_upload_complete(session, payload, ws)
+        elif action == "complication:action":
+            await self._handle_complication_action(session, payload, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -1088,6 +1090,26 @@ class E2EEHandler:
             "size": len(assembled),
             "path": str(final_path),
         })
+
+    async def _handle_complication_action(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Handle a user action on a complication (e.g. git push)."""
+        if not self._agent_server or not self._agent_server._complications:
+            log.warning("Complication action received but no complications registry")
+            return
+        channel_id = payload.get("channel_id", "")
+        complication_id = payload.get("complication_id", "")
+        option_id = payload.get("option_id", "")
+        if not channel_id or not complication_id or not option_id:
+            log.warning("Complication action missing required fields")
+            return
+        await self._agent_server._complications.handle_action(
+            channel_id, complication_id, option_id,
+        )
 
     async def _send_frame(
         self,

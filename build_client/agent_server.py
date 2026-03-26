@@ -93,10 +93,12 @@ class AgentServer:
         host: str = "127.0.0.1",
         port: int = DEFAULT_AGENT_PORT,
         e2ee_store: Any = None,
+        complications: Any = None,
     ) -> None:
         self.store = store
         self._broadcast = broadcast
         self._e2ee_store = e2ee_store  # MessageStore for checking unread messages
+        self._complications = complications  # ComplicationRegistry
         self._host = host
         self._port = port
         self._agents: dict[str, AgentConnection] = {}  # agent_id -> connection
@@ -638,6 +640,16 @@ class AgentServer:
                 "created_at": record.created_at,
             },
         })
+
+        # Trigger complications evaluation (debounced).
+        if self._complications:
+            channel = self.store.get_channel(agent.channel_id)
+            working_dir = channel.working_directory if channel else ""
+            asyncio.create_task(
+                self._complications.on_tool_event(
+                    agent.channel_id, name, tool_input, working_dir,
+                )
+            )
 
     async def _handle_tool_result(
         self, agent: AgentConnection, data: dict[str, Any],

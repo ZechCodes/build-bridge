@@ -24,6 +24,7 @@ from build_client.agent_server import AgentServer, DEFAULT_AGENT_PORT
 from build_client.agent_spawner import AgentSpawner
 from build_client.agent_store import AgentStore
 from build_client.auth import device_auth_flow
+from build_client.complications import ComplicationRegistry
 from build_client.config import load_config
 from build_client.e2ee import E2EEHandler
 from build_client.storage import MessageStore
@@ -64,11 +65,15 @@ async def async_main(
     handler = E2EEHandler(config, store)
 
     # Initialize agent server with E2EE broadcast callback.
+    complications = ComplicationRegistry(
+        broadcast=handler.broadcast_to_sessions,
+    )
     agent_server = AgentServer(
         store=agent_store,
         broadcast=handler.broadcast_to_sessions,
         port=agent_port,
         e2ee_store=store,
+        complications=complications,
     )
 
     # Initialize agent spawner for managing agent worker processes.
