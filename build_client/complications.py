@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field, asdict
 from functools import lru_cache
@@ -48,6 +49,9 @@ class GitStatusData:
     stash_count: int = 0
     detached: bool = False
     last_fetch: float | None = None
+    remote_name: str | None = None  # e.g. "owner/repo"
+    insertions: int = 0  # total line insertions (staged + unstaged)
+    deletions: int = 0  # total line deletions (staged + unstaged)
 
 
 @dataclass
@@ -146,9 +150,10 @@ async def git_ahead_behind(repo: str, upstream: str | None) -> tuple[int, int]:
         return 0, 0
 
 
-def _parse_numstat(output: str) -> FileDiffSummary:
-    """Parse git diff --numstat output into a FileDiffSummary."""
+def _parse_numstat(output: str) -> tuple[FileDiffSummary, int, int]:
+    """Parse git diff --numstat output into (FileDiffSummary, insertions, deletions)."""
     added = modified = deleted = 0
+    total_ins = total_dels = 0
     for line in output.splitlines():
         parts = line.split("\t")
         if len(parts) < 3:
@@ -161,20 +166,24 @@ def _parse_numstat(output: str) -> FileDiffSummary:
             i, d = int(ins), int(dels)
         except ValueError:
             continue
+        total_ins += i
+        total_dels += d
         if d == 0 and i > 0:
             added += 1
         elif i == 0 and d > 0:
             deleted += 1
         else:
             modified += 1
-    return FileDiffSummary(added=added, modified=modified, deleted=deleted)
+    return FileDiffSummary(added=added, modified=modified, deleted=deleted), total_ins, total_dels
 
 
-async def git_diff_summary(repo: str) -> tuple[FileDiffSummary, FileDiffSummary]:
-    """Returns (staged, unstaged) diff summaries."""
+async def git_diff_summary(repo: str) -> tuple[FileDiffSummary, FileDiffSummary, int, int]:
+    """Returns (staged, unstaged, total_insertions, total_deletions)."""
     staged_out, _ = await _run_git(repo, ["diff", "--cached", "--numstat"])
     unstaged_out, _ = await _run_git(repo, ["diff", "--numstat"])
-    return _parse_numstat(staged_out), _parse_numstat(unstaged_out)
+    staged, s_ins, s_dels = _parse_numstat(staged_out)
+    unstaged, u_ins, u_dels = _parse_numstat(unstaged_out)
+    return staged, unstaged, s_ins + u_ins, s_dels + u_dels
 
 
 async def git_untracked_count(repo: str) -> int:
@@ -213,14 +222,25 @@ def last_fetch_time(repo: str) -> float | None:
         return None
 
 
+async def git_remote_name(repo: str) -> str | None:
+    """Extract a human-readable remote name like 'owner/repo' from the origin URL."""
+    url, ok = await _run_git(repo, ["remote", "get-url", "origin"])
+    if not ok or not url:
+        return None
+    # Handle SSH: git@github.com:owner/repo.git
+    m = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", url)
+    return m.group(1) if m else None
+
+
 async def evaluate_git_status(repo: str) -> GitStatusData:
     """Evaluate full git status for a repository."""
     branch, detached, upstream = await git_branch_info(repo)
     ahead, behind = await git_ahead_behind(repo, upstream)
-    staged, unstaged = await git_diff_summary(repo)
+    staged, unstaged, insertions, deletions = await git_diff_summary(repo)
     untracked = await git_untracked_count(repo)
     conflicts = await git_conflict_count(repo)
     stashes = await git_stash_count(repo)
+    remote = await git_remote_name(repo)
 
     return GitStatusData(
         repo=repo,
@@ -235,6 +255,9 @@ async def evaluate_git_status(repo: str) -> GitStatusData:
         stash_count=stashes,
         detached=detached,
         last_fetch=last_fetch_time(repo),
+        remote_name=remote,
+        insertions=insertions,
+        deletions=deletions,
     )
 
 
@@ -285,6 +308,9 @@ def _git_status_to_dict(data: GitStatusData) -> dict[str, Any]:
         "stash_count": data.stash_count,
         "detached": data.detached,
         "last_fetch": data.last_fetch,
+        "remote_name": data.remote_name,
+        "insertions": data.insertions,
+        "deletions": data.deletions,
     }
 
 
@@ -397,6 +423,11 @@ class ComplicationRegistry:
             repo = find_git_repo(working_directory)
             if repo:
                 repos.add(repo)
+
+        # If still no repos found (e.g. Bash with no path info), re-evaluate
+        # all already-tracked repos for this channel.
+        if not repos:
+            repos = self._active_repos.get(channel_id, set()).copy()
 
         for repo in repos:
             # Track as active for polling.
