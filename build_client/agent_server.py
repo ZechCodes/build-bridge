@@ -399,6 +399,9 @@ class AgentServer:
                 )
                 log.info("Created channel %s for agent %s", channel_id, agent_id[:8])
 
+        # Always start with plan mode off — it's opt-in per session.
+        self.store.update_plan_mode(channel.id, False)
+
         # Build history for agent.configured.
         chat_history = [
             {"role": m.role, "content": m.content}
