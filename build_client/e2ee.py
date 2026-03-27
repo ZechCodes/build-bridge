@@ -265,7 +265,9 @@ class E2EEHandler:
         # Send current complications so the browser has state immediately.
         if self._agent_server and self._agent_server._complications:
             try:
-                comps = await self._agent_server._complications.get_current_complications()
+                comps = await self._agent_server._complications.get_current_complications(
+                    agent_store=self._agent_server.store,
+                )
                 for comp in comps:
                     await self._send_frame(session, ws, payload=comp)
             except Exception as exc:

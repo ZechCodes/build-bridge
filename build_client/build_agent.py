@@ -666,14 +666,17 @@ async def run_agent(
                         notification = wrapper.chat_mcp.build_unread_notification()
                         prompt = chat_context + history_ctx + (notification or "Check in with the user.")
                     else:
-                        prompt = chat_context + history_ctx + "You are online. Check in with the user using the send tool."
+                        # No messages — just notify browser and wait.
+                        await wrapper.emit_system_message("Agent is ready.")
+                        prompt = None
                 next_prompt = None
 
-                # Initial query.
-                log.info("Sending initial prompt to agent")
-                await client.query(prompt)
-                async for message in client.receive_response():
-                    await handle_response_message(message, wrapper)
+                # Initial query (skip if no prompt — agent is idle).
+                if prompt:
+                    log.info("Sending initial prompt to agent")
+                    await client.query(prompt)
+                    async for message in client.receive_response():
+                        await handle_response_message(message, wrapper)
 
                 # Message loop — wait for user messages and inject them.
                 exit_reason = "context_ended"

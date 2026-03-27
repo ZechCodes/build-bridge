@@ -490,11 +490,29 @@ class ComplicationRegistry:
         # Re-evaluate and broadcast updated state.
         await self._evaluate_and_broadcast(channel_id, repo)
 
-    async def get_current_complications(self) -> list[dict[str, Any]]:
+    async def get_current_complications(
+        self, agent_store: Any | None = None,
+    ) -> list[dict[str, Any]]:
         """Return the current complication payloads for all tracked repos.
 
         Used to send initial state when a browser session connects.
+        If *agent_store* is provided, also discovers repos from persisted
+        channel working directories (so complications survive restarts).
         """
+        # Seed _active_repos from persisted channel working directories.
+        if agent_store is not None:
+            try:
+                for ch in agent_store.list_resumable_channels():
+                    if ch.id in self._active_repos:
+                        continue  # already tracked
+                    wd = getattr(ch, "working_directory", "")
+                    if wd:
+                        repo = find_git_repo(wd)
+                        if repo:
+                            self._active_repos.setdefault(ch.id, set()).add(repo)
+            except Exception as exc:
+                log.debug("Failed to seed repos from agent store: %s", exc)
+
         results: list[dict[str, Any]] = []
         for channel_id, repos in list(self._active_repos.items()):
             for repo in list(repos):
