@@ -26,6 +26,7 @@ from build_client.agent_protocol import (
     AGENT_HELLO,
     AGENT_CONFIGURED,
     AGENT_STATE_UPDATE,
+    AGENT_SYSTEM_MESSAGE,
     AGENT_TO_CLIENT,
     BIDIRECTIONAL,
     CHAT_RESPONSE,
@@ -771,6 +772,17 @@ class AgentServer:
             "event": payload,
         })
 
+    async def _handle_system_message(
+        self, agent: AgentConnection, data: dict[str, Any],
+    ) -> None:
+        """Handle agent.system_message — broadcast as ephemeral system notification."""
+        payload = data["payload"]
+        await self._notify_browser(agent.channel_id, {
+            "action": "system_message",
+            "channel_id": agent.channel_id,
+            "text": payload.get("text", ""),
+        })
+
     # Handler dispatch table.
     _handlers: dict[str, Any] = {
         CHAT_RESPONSE: _handle_chat_response,
@@ -783,6 +795,7 @@ class AgentServer:
         AGENT_ERROR: _handle_agent_error,
         INTERACTION_REQUEST: _handle_interaction_request,
         AGENT_STATE_UPDATE: _handle_state_update,
+        AGENT_SYSTEM_MESSAGE: _handle_system_message,
     }
 
     # -----------------------------------------------------------------

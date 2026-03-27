@@ -45,13 +45,14 @@ INTERACTION_RESPONSE = "interaction.response"
 
 # Agent state (no capability required — part of agent namespace).
 AGENT_STATE_UPDATE = "agent.state_update"
+AGENT_SYSTEM_MESSAGE = "agent.system_message"
 
 # ---------------------------------------------------------------------------
 # Direction constraints
 # ---------------------------------------------------------------------------
 
 AGENT_TO_CLIENT: frozenset[str] = frozenset({
-    AGENT_HELLO, AGENT_GOODBYE, AGENT_STATE_UPDATE,
+    AGENT_HELLO, AGENT_GOODBYE, AGENT_STATE_UPDATE, AGENT_SYSTEM_MESSAGE,
     CHAT_RESPONSE,
     ACTIVITY_DELTA, ACTIVITY_PING, ACTIVITY_END,
     TOOL_USE, TOOL_RESULT,

@@ -54,6 +54,7 @@ from build_client.agent_protocol import (
     AGENT_HELLO,
     AGENT_SHUTDOWN,
     AGENT_STATE_UPDATE,
+    AGENT_SYSTEM_MESSAGE,
     CHAT_CANCEL,
     CHAT_MESSAGE,
     CHAT_RESPONSE,
@@ -444,6 +445,11 @@ class AgentWrapper:
             "allow_freeform": allow_freeform,
             "plan": plan,
         })
+        await self._send(envelope)
+
+    async def emit_system_message(self, text: str) -> None:
+        """Emit agent.system_message — ephemeral system notification to browser."""
+        envelope = make_envelope(AGENT_SYSTEM_MESSAGE, {"text": text})
         await self._send(envelope)
 
     async def emit_state_update(self, *, plan_mode: bool) -> None:

@@ -273,7 +273,11 @@ class CodexHarnessRuntime:
         })
         self.thread_id = thread["thread"]["id"]
 
-        await self._start_or_steer(self._initial_turn_text())
+        initial = self._initial_turn_text()
+        if initial:
+            await self._start_or_steer(initial)
+        else:
+            await self.wrapper.emit_system_message("Agent is ready.")
 
         ping_task = asyncio.create_task(self._ping_loop())
         try:
@@ -332,14 +336,14 @@ class CodexHarnessRuntime:
             instructions += "\n" + self.config.chat_instructions
         return instructions.strip()
 
-    def _initial_turn_text(self) -> str:
+    def _initial_turn_text(self) -> str | None:
         history = _build_history_context(self.config.chat_history)
         if self.initial_prompt:
             return history + self.initial_prompt
         if self.wrapper.chat_mcp.has_unread:
             unread = self.wrapper.chat_mcp.build_unread_notification() or ""
             return history + unread
-        return history + "You are online. Check in with the user using the send tool."
+        return None  # no turn needed — wait for messages
 
     async def _next_notification_text(self, timeout: float) -> str | None:
         parts: list[str] = []
