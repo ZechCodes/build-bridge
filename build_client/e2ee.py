@@ -262,6 +262,15 @@ class E2EEHandler:
             payload={"action": "channel_list", "channels": channel_list},
         )
 
+        # Send current complications so the browser has state immediately.
+        if self._agent_server and self._agent_server._complications:
+            try:
+                comps = await self._agent_server._complications.get_current_complications()
+                for comp in comps:
+                    await self._send_frame(session, ws, payload=comp)
+            except Exception as exc:
+                log.debug("Failed to send initial complications: %s", exc)
+
     async def _create_channel(
         self,
         session: ActiveSession,

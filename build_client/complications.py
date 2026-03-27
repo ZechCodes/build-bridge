@@ -490,6 +490,30 @@ class ComplicationRegistry:
         # Re-evaluate and broadcast updated state.
         await self._evaluate_and_broadcast(channel_id, repo)
 
+    async def get_current_complications(self) -> list[dict[str, Any]]:
+        """Return the current complication payloads for all tracked repos.
+
+        Used to send initial state when a browser session connects.
+        """
+        results: list[dict[str, Any]] = []
+        for channel_id, repos in list(self._active_repos.items()):
+            for repo in list(repos):
+                try:
+                    data = await evaluate_git_status(repo)
+                    options = build_git_options(data)
+                    results.append({
+                        "action": "complication:update",
+                        "channel_id": channel_id,
+                        "id": f"git:{repo}",
+                        "kind": "git-status",
+                        "timestamp": time.time() * 1000,
+                        "data": _git_status_to_dict(data),
+                        "options": options,
+                    })
+                except Exception as exc:
+                    log.debug("Failed to get complication for %s: %s", repo, exc)
+        return results
+
     def remove_channel(self, channel_id: str) -> None:
         """Clean up tracking for a removed channel."""
         self._active_repos.pop(channel_id, None)
