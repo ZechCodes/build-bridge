@@ -237,6 +237,8 @@ class E2EEHandler:
             await self._handle_upload_complete(session, payload, ws)
         elif action == "complication:action":
             await self._handle_complication_action(session, payload, ws)
+        elif action == "get_complications":
+            await self._send_complications(session, payload, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -516,6 +518,34 @@ class E2EEHandler:
                 "channel_id": channel_id,
                 "entries": entries,
                 "total_tool_uses": total_tool_uses,
+            },
+        )
+
+    async def _send_complications(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Send current complications for a channel."""
+        channel_id = payload.get("channel_id", "")
+        complications: list[dict[str, Any]] = []
+
+        if self._agent_server and self._agent_server._complications:
+            try:
+                all_comps = await self._agent_server._complications.get_current_complications(
+                    agent_store=self._agent_server.store,
+                )
+                complications = [c for c in all_comps if c.get("channel_id") == channel_id]
+            except Exception as exc:
+                log.debug("Failed to get complications for %s: %s", channel_id[:8], exc)
+
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "complications",
+                "channel_id": channel_id,
+                "complications": complications,
             },
         )
 
