@@ -86,6 +86,7 @@ async def async_main(
     # Initialize agent server with E2EE broadcast callback.
     complications = ComplicationRegistry(
         broadcast=handler.broadcast_to_sessions,
+        agent_store=agent_store,
     )
     agent_server = AgentServer(
         store=agent_store,

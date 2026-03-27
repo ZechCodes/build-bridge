@@ -360,8 +360,9 @@ def extract_file_paths(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
 class ComplicationRegistry:
     """Manages complication evaluation, debouncing, and broadcasting."""
 
-    def __init__(self, broadcast: BroadcastFn, debounce_ms: int = 500):
+    def __init__(self, broadcast: BroadcastFn, agent_store: Any | None = None, debounce_ms: int = 500):
         self._broadcast = broadcast
+        self._agent_store = agent_store
         self._debounce_ms = debounce_ms
         self._pending: dict[str, asyncio.Task[None]] = {}
         # Track active repos per channel for background polling.
@@ -456,16 +457,26 @@ class ComplicationRegistry:
         try:
             data = await evaluate_git_status(repo)
             options = build_git_options(data)
+            data_dict = _git_status_to_dict(data)
+            comp_id = f"git:{repo}"
             msg: dict[str, Any] = {
                 "action": "complication:update",
                 "channel_id": channel_id,
-                "id": f"git:{repo}",
+                "id": comp_id,
                 "kind": "git-status",
                 "timestamp": time.time() * 1000,
-                "data": _git_status_to_dict(data),
+                "data": data_dict,
                 "options": options,
             }
             await self._broadcast(channel_id, msg)
+            # Persist to DB so complications survive restarts.
+            if self._agent_store:
+                try:
+                    self._agent_store.save_complication(
+                        channel_id, comp_id, "git-status", data_dict, options,
+                    )
+                except Exception as exc:
+                    log.debug("Failed to persist complication %s: %s", comp_id, exc)
         except Exception as exc:
             log.error("Complication evaluation failed for %s: %s", repo, exc, exc_info=True)
 
@@ -496,13 +507,38 @@ class ComplicationRegistry:
         """Return the current complication payloads for all tracked repos.
 
         Used to send initial state when a browser session connects.
-        If *agent_store* is provided, also discovers repos from persisted
-        channel working directories (so complications survive restarts).
+        Loads persisted complications from DB for instant display, and seeds
+        ``_active_repos`` so the poll loop keeps them fresh.
         """
-        # Seed _active_repos from persisted channel working directories.
-        if agent_store is not None:
+        store = agent_store or self._agent_store
+        results: list[dict[str, Any]] = []
+
+        # 1. Load persisted complications from DB (instant, no git eval).
+        if store is not None:
             try:
-                for ch in agent_store.list_resumable_channels():
+                for comp in store.get_all_complications():
+                    channel_id = comp["channel_id"]
+                    comp_id = comp["id"]
+                    results.append({
+                        "action": "complication:update",
+                        "channel_id": channel_id,
+                        "id": comp_id,
+                        "kind": comp["kind"],
+                        "timestamp": time.time() * 1000,
+                        "data": comp["data"],
+                        "options": comp["options"],
+                    })
+                    # Seed _active_repos from persisted complication ids.
+                    if comp_id.startswith("git:"):
+                        repo = comp_id[4:]
+                        self._active_repos.setdefault(channel_id, set()).add(repo)
+            except Exception as exc:
+                log.debug("Failed to load persisted complications: %s", exc)
+
+        # 2. Also seed from persisted channel working directories.
+        if store is not None:
+            try:
+                for ch in store.list_resumable_channels():
                     if ch.id in self._active_repos:
                         continue  # already tracked
                     wd = getattr(ch, "working_directory", "")
@@ -513,23 +549,42 @@ class ComplicationRegistry:
             except Exception as exc:
                 log.debug("Failed to seed repos from agent store: %s", exc)
 
-        results: list[dict[str, Any]] = []
+        # 3. For channels that were seeded from working dirs but had no
+        #    persisted complication, evaluate now so they show immediately.
+        seen = {(r["channel_id"], r["id"]) for r in results}
         for channel_id, repos in list(self._active_repos.items()):
             for repo in list(repos):
+                comp_id = f"git:{repo}"
+                if (channel_id, comp_id) in seen:
+                    continue
                 try:
                     data = await evaluate_git_status(repo)
                     options = build_git_options(data)
+                    data_dict = _git_status_to_dict(data)
                     results.append({
                         "action": "complication:update",
                         "channel_id": channel_id,
-                        "id": f"git:{repo}",
+                        "id": comp_id,
                         "kind": "git-status",
                         "timestamp": time.time() * 1000,
-                        "data": _git_status_to_dict(data),
+                        "data": data_dict,
                         "options": options,
                     })
+                    # Persist newly evaluated complication.
+                    if store:
+                        try:
+                            store.save_complication(
+                                channel_id, comp_id, "git-status", data_dict, options,
+                            )
+                        except Exception:
+                            pass
                 except Exception as exc:
                     log.debug("Failed to get complication for %s: %s", repo, exc)
+
+        # 4. Start polling if we have active repos.
+        if self._active_repos:
+            self.start_polling()
+
         return results
 
     def remove_channel(self, channel_id: str) -> None:

@@ -113,11 +113,13 @@ class AgentSpawner:
                 harness=harness,
                 model=model,
                 system_prompt=system_prompt,
+                working_directory=working_directory,
             )
         else:
             # Update existing channel with new agent_id.
             self._store.update_channel_agent(
                 channel_id, agent_id, harness, model, system_prompt,
+                working_directory=working_directory,
             )
 
         # Build the command.

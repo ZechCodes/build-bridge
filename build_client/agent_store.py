@@ -1,6 +1,6 @@
 """SQLite storage for Build Agent Protocol data (§9).
 
-Tables: agent_channels, chat_messages, activity_log, tool_uses.
+Tables: agent_channels, chat_messages, activity_log, tool_uses, complications.
 Designed to share the same DB file as the E2EE MessageStore.
 """
 
@@ -136,6 +136,16 @@ class AgentStore:
 
             CREATE INDEX IF NOT EXISTS idx_tool_uses_channel
                 ON tool_uses(channel_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS complications (
+                id          TEXT NOT NULL,
+                channel_id  TEXT NOT NULL,
+                kind        TEXT NOT NULL,
+                data        TEXT NOT NULL,
+                options     TEXT NOT NULL DEFAULT '[]',
+                updated_at  TEXT NOT NULL,
+                PRIMARY KEY (channel_id, id)
+            );
         """)
 
         # Migrations for existing databases.
@@ -206,12 +216,13 @@ class AgentStore:
         harness: str,
         model: str,
         system_prompt: str = "",
+        working_directory: str = "",
     ) -> None:
         """Update a channel with a new agent assignment and reactivate it."""
         self.db.execute(
             "UPDATE agent_channels SET agent_id = ?, harness = ?, model = ?, "
-            "system_prompt = ?, status = 'active', updated_at = ? WHERE id = ?",
-            (agent_id, harness, model, system_prompt, now_iso(), channel_id),
+            "system_prompt = ?, working_directory = ?, status = 'active', updated_at = ? WHERE id = ?",
+            (agent_id, harness, model, system_prompt, working_directory, now_iso(), channel_id),
         )
         self.db.commit()
 
@@ -457,6 +468,64 @@ class AgentStore:
         self.db.execute(
             "UPDATE agent_channels SET plan_mode = ?, updated_at = ? WHERE id = ?",
             (int(enabled), now_iso(), channel_id),
+        )
+        self.db.commit()
+
+    # ----- Complications -----
+
+    def save_complication(
+        self,
+        channel_id: str,
+        comp_id: str,
+        kind: str,
+        data: dict[str, Any],
+        options: list[dict[str, Any]],
+    ) -> None:
+        """Upsert a complication payload."""
+        self.db.execute(
+            "INSERT OR REPLACE INTO complications (id, channel_id, kind, data, options, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (comp_id, channel_id, kind, json.dumps(data), json.dumps(options), now_iso()),
+        )
+        self.db.commit()
+
+    def get_complications(self, channel_id: str) -> list[dict[str, Any]]:
+        """Return all persisted complications for a channel."""
+        rows = self.db.execute(
+            "SELECT * FROM complications WHERE channel_id = ?", (channel_id,),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "channel_id": r["channel_id"],
+                "kind": r["kind"],
+                "data": json.loads(r["data"]),
+                "options": json.loads(r["options"]),
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+
+    def get_all_complications(self) -> list[dict[str, Any]]:
+        """Return all persisted complications across all channels."""
+        rows = self.db.execute("SELECT * FROM complications").fetchall()
+        return [
+            {
+                "id": r["id"],
+                "channel_id": r["channel_id"],
+                "kind": r["kind"],
+                "data": json.loads(r["data"]),
+                "options": json.loads(r["options"]),
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+
+    def delete_complication(self, channel_id: str, comp_id: str) -> None:
+        """Remove a persisted complication."""
+        self.db.execute(
+            "DELETE FROM complications WHERE channel_id = ? AND id = ?",
+            (channel_id, comp_id),
         )
         self.db.commit()
 
