@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -593,22 +594,38 @@ class E2EEHandler:
             return
 
         if not self._agent_server.is_channel_active(channel_id):
-            # Log detailed diagnostics.
-            known_channels = list(self._agent_server._channel_to_agent.keys())
-            spawner_workers = list(self._agent_spawner.workers.keys()) if self._agent_spawner else []
-            log.error(
-                "No active agent on channel %s. "
-                "Agent server active channels: %s. "
-                "Spawner tracked workers: %s",
-                channel_id[:8],
-                [c[:8] for c in known_channels],
-                [w[:8] for w in spawner_workers],
-            )
-            await self._send_error_message(
+            # Agent is down — auto-restart it and notify the user.
+            log.warning("No active agent on channel %s, attempting auto-restart", channel_id[:8])
+            await self._send_system_message(
                 session, ws, channel_id,
-                "No agent connected on this channel. Try restarting the agent.",
+                "Agent is restarting, please standby...",
             )
-            return
+            restarted = False
+            if self._agent_spawner:
+                try:
+                    worker = await self._agent_spawner.restart(channel_id)
+                    if worker:
+                        log.info("Auto-restarted agent on channel %s (pid=%s)", channel_id[:8], worker.pid)
+                        restarted = True
+                except Exception as exc:
+                    log.error("Failed to auto-restart agent on channel %s: %s", channel_id[:8], exc)
+            if not restarted:
+                await self._send_system_message(
+                    session, ws, channel_id,
+                    "Failed to restart agent. Try restarting manually.",
+                )
+                return
+            # Wait briefly for the agent to connect, then retry forwarding.
+            for _ in range(10):
+                await asyncio.sleep(0.5)
+                if self._agent_server.is_channel_active(channel_id):
+                    break
+            else:
+                await self._send_system_message(
+                    session, ws, channel_id,
+                    "Agent is still starting up. Your message will be delivered when it connects.",
+                )
+                return
 
         # Enrich attachment metadata with local file paths so agents can read files.
         enriched_attachments = None
@@ -646,10 +663,31 @@ class E2EEHandler:
                 "(agent lookup succeeded but send failed)",
                 channel_id[:8],
             )
-            await self._send_error_message(
+            await self._send_system_message(
                 session, ws, channel_id,
-                "Failed to deliver message to agent. The agent may have disconnected.",
+                "Message delivery failed. The agent may have disconnected.",
             )
+
+    async def _send_system_message(
+        self,
+        session: ActiveSession,
+        ws: Any,
+        channel_id: str,
+        text: str,
+    ) -> None:
+        """Send an ephemeral system message to the browser.
+
+        Not stored in the database — only shown in the current session.
+        The browser renders it as a transient notification inline in chat.
+        """
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "system_message",
+                "channel_id": channel_id,
+                "text": text,
+            },
+        )
 
     async def _send_error_message(
         self,
