@@ -147,6 +147,16 @@ def make_chat_tools(wrapper: AgentWrapper) -> list:
             if not content_blocks:
                 content_blocks = [{"type": "text", "text": json.dumps(result)}]
 
+            # Remind the agent to use the send tool to respond.
+            content_blocks.append({
+                "type": "text",
+                "text": (
+                    "REMINDER: The user cannot see your text responses. "
+                    "Use mcp__build_chat__send to communicate what you're "
+                    "going to do and what you've done."
+                ),
+            })
+
             return {"content": content_blocks}
         except (ConnectionError, RuntimeError, OSError) as e:
             log.warning("read_unread tool error: %s", e)
@@ -435,11 +445,24 @@ def make_stop_hook(wrapper: AgentWrapper):
 
 
 def make_pre_compact_hook(wrapper: AgentWrapper):
-    """PreCompact hook — emit activity delta about compaction."""
+    """PreCompact hook — emit activity delta and inject chat reminder."""
+
+    _CHAT_REMINDER = (
+        "\n\nIMPORTANT: You are communicating through a remote chat interface. "
+        "The user CANNOT see your text responses. The ONLY way to communicate "
+        "with the user is by calling the mcp__build_chat__send tool. "
+        "Always use mcp__build_chat__send to tell the user what you're going "
+        "to do and what you've done."
+    )
 
     async def hook(input_data, tool_use_id, context):
         trigger = input_data.get("trigger", "auto")
         await wrapper.emit_activity_delta("text", f"Compacting context ({trigger})...")
+
+        # Inject chat instructions so they survive compaction.
+        existing = input_data.get("custom_instructions") or ""
+        input_data["custom_instructions"] = existing + _CHAT_REMINDER
+
         return {}
 
     return hook
