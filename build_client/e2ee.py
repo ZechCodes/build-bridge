@@ -243,6 +243,8 @@ class E2EEHandler:
             await self._handle_complication_action(session, payload, ws)
         elif action == "get_complications":
             await self._send_complications(session, payload, ws)
+        elif action == "reset_session":
+            await self._reset_session(session, payload, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -1013,6 +1015,27 @@ class E2EEHandler:
                 session, ws,
                 payload={"action": "error", "error": f"failed to restart agent: {exc}"},
             )
+
+    async def _reset_session(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Reset session context: mark boundary and restart agent with clean history."""
+        channel_id = payload.get("channel_id")
+        if not channel_id:
+            return
+        timestamp = self._agent_server.store.reset_session(channel_id)
+        worker = await self._agent_spawner.restart(channel_id)
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "session_reset",
+                "channel_id": channel_id,
+                "session_start_at": timestamp,
+            },
+        )
 
     async def _send_worker_list(self, session: ActiveSession, ws: Any) -> None:
         """Send list of running agent workers to the browser."""

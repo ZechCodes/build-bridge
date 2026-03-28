@@ -406,10 +406,10 @@ class AgentServer:
         # Build history for agent.configured.
         chat_history = [
             {"role": m.role, "content": m.content}
-            for m in self.store.get_chat_history(channel.id)
+            for m in self.store.get_chat_history(channel.id, since=channel.session_start_at)
         ]
         activity_history = [
-            json.loads(e.data) for e in self.store.get_activity_history(channel.id)
+            json.loads(e.data) for e in self.store.get_activity_history(channel.id, since=channel.session_start_at)
         ]
 
         # Register the connection.

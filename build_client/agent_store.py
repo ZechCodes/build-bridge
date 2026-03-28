@@ -36,6 +36,7 @@ class AgentChannel:
     updated_at: str
     working_directory: str = ""
     plan_mode: bool = False
+    session_start_at: str | None = None
 
 
 @dataclass
@@ -152,6 +153,7 @@ class AgentStore:
         for stmt in (
             "ALTER TABLE chat_messages ADD COLUMN metadata TEXT",
             "ALTER TABLE agent_channels ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE agent_channels ADD COLUMN session_start_at TEXT",
         ):
             try:
                 self.db.execute(stmt)
@@ -280,12 +282,18 @@ class AgentStore:
         self.touch_channel(channel_id)
         return ChatMessage(id=msg_id, channel_id=channel_id, role=role, content=content, created_at=now)
 
-    def get_chat_history(self, channel_id: str) -> list[ChatMessage]:
-        """Get full chat history for a channel, chronological order."""
-        rows = self.db.execute(
-            "SELECT * FROM chat_messages WHERE channel_id = ? ORDER BY created_at ASC",
-            (channel_id,),
-        ).fetchall()
+    def get_chat_history(self, channel_id: str, since: str | None = None) -> list[ChatMessage]:
+        """Get chat history for a channel, optionally filtered to messages after `since`."""
+        if since:
+            rows = self.db.execute(
+                "SELECT * FROM chat_messages WHERE channel_id = ? AND created_at > ? ORDER BY created_at ASC",
+                (channel_id, since),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM chat_messages WHERE channel_id = ? ORDER BY created_at ASC",
+                (channel_id,),
+            ).fetchall()
         return [self._row_to_chat_message(r) for r in rows]
 
     @staticmethod
@@ -320,12 +328,18 @@ class AgentStore:
             type=entry_type, data=data_json, created_at=now,
         )
 
-    def get_activity_history(self, channel_id: str) -> list[ActivityEntry]:
-        """Get full activity history for a channel, chronological order."""
-        rows = self.db.execute(
-            "SELECT * FROM activity_log WHERE channel_id = ? ORDER BY created_at ASC",
-            (channel_id,),
-        ).fetchall()
+    def get_activity_history(self, channel_id: str, since: str | None = None) -> list[ActivityEntry]:
+        """Get activity history for a channel, optionally filtered to entries after `since`."""
+        if since:
+            rows = self.db.execute(
+                "SELECT * FROM activity_log WHERE channel_id = ? AND created_at > ? ORDER BY created_at ASC",
+                (channel_id, since),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM activity_log WHERE channel_id = ? ORDER BY created_at ASC",
+                (channel_id,),
+            ).fetchall()
         return [
             ActivityEntry(
                 id=r["id"], channel_id=r["channel_id"],
@@ -404,6 +418,7 @@ class AgentStore:
             created_at=row["created_at"], updated_at=row["updated_at"],
             working_directory=row["working_directory"] if "working_directory" in keys else "",
             plan_mode=bool(row["plan_mode"]) if "plan_mode" in keys else False,
+            session_start_at=row["session_start_at"] if "session_start_at" in keys else None,
         )
 
     # ----- Interactions -----
@@ -479,6 +494,16 @@ class AgentStore:
             (int(enabled), now_iso(), channel_id),
         )
         self.db.commit()
+
+    def reset_session(self, channel_id: str) -> str:
+        """Mark a new session boundary. Returns the timestamp."""
+        now = now_iso()
+        self.db.execute(
+            "UPDATE agent_channels SET session_start_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, channel_id),
+        )
+        self.db.commit()
+        return now
 
     # ----- Complications -----
 
