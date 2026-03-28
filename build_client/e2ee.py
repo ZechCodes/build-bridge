@@ -461,7 +461,7 @@ class E2EEHandler:
                 import json as _json
                 activity = self._agent_server.store.get_activity_history(channel_id)
                 for entry in activity:
-                    if entry.type in ("tool_use", "tool_result"):
+                    if entry.type in ("tool_use", "tool_result", "text"):
                         try:
                             data = _json.loads(entry.data)
                         except (ValueError, TypeError):
@@ -474,6 +474,11 @@ class E2EEHandler:
                             }
                         # Trim large tool result content for history view.
                         if entry.type == "tool_result":
+                            c = data.get("content", "")
+                            if isinstance(c, str) and len(c) > self._MAX_RESULT_CONTENT_LEN:
+                                data["content"] = c[:self._MAX_RESULT_CONTENT_LEN] + "…"
+                        # Trim reasoning text for history view.
+                        if entry.type == "text":
                             c = data.get("content", "")
                             if isinstance(c, str) and len(c) > self._MAX_RESULT_CONTENT_LEN:
                                 data["content"] = c[:self._MAX_RESULT_CONTENT_LEN] + "…"
