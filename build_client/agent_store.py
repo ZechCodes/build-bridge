@@ -37,6 +37,7 @@ class AgentChannel:
     working_directory: str = ""
     plan_mode: bool = False
     session_start_at: str | None = None
+    last_seen_at: str | None = None
 
 
 @dataclass
@@ -154,6 +155,7 @@ class AgentStore:
             "ALTER TABLE chat_messages ADD COLUMN metadata TEXT",
             "ALTER TABLE agent_channels ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE agent_channels ADD COLUMN session_start_at TEXT",
+            "ALTER TABLE agent_channels ADD COLUMN last_seen_at TEXT",
             "ALTER TABLE complications ADD COLUMN changed_at REAL",
         ):
             try:
@@ -420,6 +422,7 @@ class AgentStore:
             working_directory=row["working_directory"] if "working_directory" in keys else "",
             plan_mode=bool(row["plan_mode"]) if "plan_mode" in keys else False,
             session_start_at=row["session_start_at"] if "session_start_at" in keys else None,
+            last_seen_at=row["last_seen_at"] if "last_seen_at" in keys else None,
         )
 
     # ----- Interactions -----
@@ -502,6 +505,16 @@ class AgentStore:
         self.db.execute(
             "UPDATE agent_channels SET session_start_at = ?, updated_at = ? WHERE id = ?",
             (now, now, channel_id),
+        )
+        self.db.commit()
+        return now
+
+    def mark_channel_seen(self, channel_id: str) -> str:
+        """Mark a channel as seen by the user. Returns the timestamp."""
+        now = now_iso()
+        self.db.execute(
+            "UPDATE agent_channels SET last_seen_at = ? WHERE id = ?",
+            (now, channel_id),
         )
         self.db.commit()
         return now

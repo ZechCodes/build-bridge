@@ -247,6 +247,8 @@ class E2EEHandler:
             await self._reset_session(session, payload, ws)
         elif action == "compact_session":
             await self._compact_session(session, payload, ws)
+        elif action == "mark_seen":
+            await self._mark_seen(session, payload, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -266,6 +268,7 @@ class E2EEHandler:
                     info = get_harness(agent_ch.harness)
                     entry["agent_name"] = info.name if info else "Device"
                     entry["plan_mode"] = agent_ch.plan_mode
+                    entry["last_seen_at"] = agent_ch.last_seen_at
             channel_list.append(entry)
         await self._send_frame(
             session, ws,
@@ -1108,6 +1111,18 @@ class E2EEHandler:
                 "session_start_at": timestamp,
             },
         )
+
+    async def _mark_seen(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Mark a channel as seen by the user."""
+        channel_id = payload.get("channel_id")
+        if not channel_id or not self._agent_server:
+            return
+        self._agent_server.store.mark_channel_seen(channel_id)
 
     async def _send_worker_list(self, session: ActiveSession, ws: Any) -> None:
         """Send list of running agent workers to the browser."""
