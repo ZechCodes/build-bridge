@@ -101,6 +101,23 @@ class MessageStore:
             for r in rows
         ]
 
+    def rename_channel(self, channel_id: str, name: str) -> None:
+        """Rename a channel."""
+        self.db.execute(
+            "UPDATE channels SET name = ? WHERE id = ?", (name, channel_id)
+        )
+        self.db.commit()
+
+    def delete_channel(self, channel_id: str) -> None:
+        """Delete a channel and all its messages."""
+        self.db.execute(
+            "DELETE FROM messages WHERE channel_id = ?", (channel_id,)
+        )
+        self.db.execute(
+            "DELETE FROM channels WHERE id = ?", (channel_id,)
+        )
+        self.db.commit()
+
     def store_message(
         self,
         message_id: str,

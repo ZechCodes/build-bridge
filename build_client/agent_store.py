@@ -252,6 +252,15 @@ class AgentStore:
         ).fetchall()
         return [self._row_to_channel(r) for r in rows]
 
+    def delete_channel(self, channel_id: str) -> None:
+        """Delete a channel and all related records."""
+        self.db.execute("DELETE FROM complications WHERE channel_id = ?", (channel_id,))
+        self.db.execute("DELETE FROM tool_uses WHERE channel_id = ?", (channel_id,))
+        self.db.execute("DELETE FROM activity_log WHERE channel_id = ?", (channel_id,))
+        self.db.execute("DELETE FROM chat_messages WHERE channel_id = ?", (channel_id,))
+        self.db.execute("DELETE FROM agent_channels WHERE id = ?", (channel_id,))
+        self.db.commit()
+
     # ----- Chat Messages -----
 
     def store_chat_message(

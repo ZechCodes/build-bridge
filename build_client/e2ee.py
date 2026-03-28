@@ -227,6 +227,10 @@ class E2EEHandler:
             await self._stop_agent(session, payload, ws)
         elif action == "restart_agent":
             await self._restart_agent(session, payload, ws)
+        elif action == "rename_channel":
+            await self._rename_channel(session, payload, ws)
+        elif action == "delete_channel":
+            await self._delete_channel(session, payload, ws)
         elif action == "list_workers":
             await self._send_worker_list(session, ws)
         elif action == "interaction_response":
@@ -343,6 +347,72 @@ class E2EEHandler:
                     response["agent_error"] = str(exc)
 
         await self._send_frame(session, ws, payload=response)
+
+    async def _rename_channel(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Rename an existing channel."""
+        channel_id = payload.get("channel_id", "")
+        name = payload.get("name", "").strip()
+        if not channel_id or not name:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": "channel_id and name required"},
+            )
+            return
+
+        self.store.rename_channel(channel_id, name)
+        log.info("Renamed channel %s to %r", channel_id[:8], name)
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "channel_renamed",
+                "channel_id": channel_id,
+                "name": name,
+            },
+        )
+
+    async def _delete_channel(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Delete a channel, stopping its agent first if running."""
+        channel_id = payload.get("channel_id", "")
+        if not channel_id:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": "channel_id required"},
+            )
+            return
+
+        # Stop agent if running.
+        if self._agent_spawner:
+            try:
+                await self._agent_spawner.stop(channel_id)
+            except Exception as exc:
+                log.debug("Error stopping agent for deleted channel %s: %s", channel_id[:8], exc)
+
+        # Clean up message store.
+        self.store.delete_channel(channel_id)
+        # Clean up agent store.
+        if self._agent_server and self._agent_server.store:
+            try:
+                self._agent_server.store.delete_channel(channel_id)
+            except Exception as exc:
+                log.debug("Error cleaning agent store for channel %s: %s", channel_id[:8], exc)
+        log.info("Deleted channel %s", channel_id[:8])
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "channel_deleted",
+                "channel_id": channel_id,
+            },
+        )
 
     async def _send_messages(
         self,
