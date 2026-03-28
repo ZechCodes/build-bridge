@@ -137,8 +137,13 @@ async def async_main(
         # interruptible via the shutdown event.
         if daemon_ctx:
             daemon_ctx.relay_connected = True  # run_connection auto-reconnects.
+
+            def _request_restart():
+                daemon_ctx.restart_requested = True
+                daemon_ctx.shutdown_event.set()
+
             relay_task = asyncio.create_task(
-                run_connection(config, e2e_handler=handler.handle_message)
+                run_connection(config, e2e_handler=handler.handle_message, on_restart=_request_restart)
             )
             shutdown_task = asyncio.create_task(daemon_ctx.shutdown_event.wait())
             done, pending = await asyncio.wait(

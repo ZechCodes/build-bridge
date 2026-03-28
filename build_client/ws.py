@@ -81,6 +81,7 @@ async def _receive_loop(
     ws,
     config: DeviceConfig,
     e2e_handler: E2EHandler | None = None,
+    on_restart: Callable[[], None] | None = None,
 ) -> None:
     """Read messages from the server and dispatch E2EE messages."""
     try:
@@ -102,6 +103,11 @@ async def _receive_loop(
                     log.warning("Server response error: %s", msg.get("error"))
             elif msg_type == "error":
                 log.error("Server error: %s", msg.get("error"))
+            elif msg_type == "restart":
+                log.info("Restart command received from server")
+                if on_restart:
+                    on_restart()
+                return
             elif msg_type in ("session_init", "e2ee_envelope"):
                 # E2EE messages — dispatch to handler.
                 if e2e_handler:
@@ -120,6 +126,7 @@ async def _receive_loop(
 async def run_connection(
     config: DeviceConfig,
     e2e_handler: E2EHandler | None = None,
+    on_restart: Callable[[], None] | None = None,
 ) -> None:
     """Establish WS connection and run heartbeat + receive loops.
 
@@ -129,6 +136,7 @@ async def run_connection(
         config: Device configuration with auth and transport keys.
         e2e_handler: Optional async callback for E2EE messages (session_init, e2ee_envelope).
             Called with (message_dict, websocket) so it can send responses.
+        on_restart: Optional callback invoked when a restart command is received from the server.
     """
     # Ensure transport keypair exists.
     config = _ensure_transport_keypair(config)
@@ -164,7 +172,7 @@ async def run_connection(
                 # Run heartbeat and receive loops concurrently.
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(_heartbeat_loop(ws, interval))
-                    tg.create_task(_receive_loop(ws, config, e2e_handler))
+                    tg.create_task(_receive_loop(ws, config, e2e_handler, on_restart))
 
         except SystemExit:
             raise
