@@ -104,6 +104,7 @@ class AgentServer:
         self._port = port
         self._agents: dict[str, AgentConnection] = {}  # agent_id -> connection
         self._channel_to_agent: dict[str, str] = {}  # channel_id -> agent_id
+        self._compact_futures: dict[str, asyncio.Future[str]] = {}  # channel_id -> pending summary
         self._server: Any = None
         self._serve_task: asyncio.Task | None = None
 
@@ -261,6 +262,42 @@ class AgentServer:
         except Exception as exc:
             log.error("Failed to send system instruction: %s", exc)
             return False
+
+    async def request_summary(self, channel_id: str) -> str | None:
+        """Ask the agent to summarize the session. Returns the summary text.
+
+        Sends a system instruction and waits for the agent's chat.response.
+        Returns None if no agent is connected.
+        """
+        if channel_id in self._compact_futures:
+            log.warning("Compact already in progress for channel %s", channel_id[:8])
+            return None
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._compact_futures[channel_id] = future
+
+        prompt = (
+            "Summarize this session for context continuity. Include:\n"
+            "1. What work is being done (projects, files, features)\n"
+            "2. Current progress and state\n"
+            "3. Directions or preferences the user has given\n"
+            "4. Planned next steps\n\n"
+            "Be concise but thorough. This summary will be the starting context "
+            "for a fresh session. Use the send tool to deliver your summary."
+        )
+
+        sent = await self.send_system_instruction(channel_id, prompt)
+        if not sent:
+            self._compact_futures.pop(channel_id, None)
+            return None
+
+        try:
+            return await future
+        except asyncio.CancelledError:
+            return None
+        finally:
+            self._compact_futures.pop(channel_id, None)
 
     def get_channel_for_agent(self, agent_id: str) -> str | None:
         """Get the channel_id for a connected agent."""
@@ -530,6 +567,12 @@ class AgentServer:
         """Handle chat.response — agent sends a message to the user."""
         payload = data["payload"]
         content = payload.get("content", "")
+
+        # If a compact is pending for this channel, intercept the response.
+        future = self._compact_futures.get(agent.channel_id)
+        if future and not future.done():
+            future.set_result(content)
+            return  # Don't store or notify browser — compact handler will manage it.
 
         # Store as assistant message.
         self.store.store_chat_message(
@@ -806,6 +849,11 @@ class AgentServer:
         """Remove an agent from tracking and update channel status."""
         self._agents.pop(agent.agent_id, None)
         self._channel_to_agent.pop(agent.channel_id, None)
+
+        # Cancel any pending compact summary request.
+        future = self._compact_futures.pop(agent.channel_id, None)
+        if future and not future.done():
+            future.cancel()
 
         # Mark channel as idle (not closed — agent may reconnect).
         channel = self.store.get_channel(agent.channel_id)

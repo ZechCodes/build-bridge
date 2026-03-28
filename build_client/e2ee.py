@@ -245,6 +245,8 @@ class E2EEHandler:
             await self._send_complications(session, payload, ws)
         elif action == "reset_session":
             await self._reset_session(session, payload, ws)
+        elif action == "compact_session":
+            await self._compact_session(session, payload, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -1036,6 +1038,68 @@ class E2EEHandler:
 
         timestamp = self._agent_server.store.reset_session(channel_id)
         worker = await self._agent_spawner.restart(channel_id)
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "session_reset",
+                "channel_id": channel_id,
+                "session_start_at": timestamp,
+            },
+        )
+
+    async def _compact_session(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Compact session: summarize, reset, and carry summary into new session."""
+        channel_id = payload.get("channel_id")
+        if not channel_id:
+            return
+
+        if not self._agent_server or not self._agent_spawner:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": "agent not available"},
+            )
+            return
+
+        # Notify browser that compaction has started.
+        await self._send_frame(
+            session, ws,
+            payload={"action": "compact_started", "channel_id": channel_id},
+        )
+
+        # Ask the agent to summarize. This awaits until the agent responds.
+        summary = await self._agent_server.request_summary(channel_id)
+
+        if not summary:
+            # No agent connected or already compacting — fall back to plain reset.
+            timestamp = self._agent_server.store.reset_session(channel_id)
+            await self._agent_spawner.restart(channel_id)
+            await self._send_frame(
+                session, ws,
+                payload={
+                    "action": "session_reset",
+                    "channel_id": channel_id,
+                    "session_start_at": timestamp,
+                },
+            )
+            return
+
+        # Reset session boundary.
+        timestamp = self._agent_server.store.reset_session(channel_id)
+
+        # Store summary as the first assistant message in the new session.
+        from build_client.agent_protocol import generate_id
+        self._agent_server.store.store_chat_message(
+            generate_id(), channel_id, "assistant", summary,
+        )
+
+        # Restart agent — it will pick up the summary in its history.
+        await self._agent_spawner.restart(channel_id)
+
         await self._send_frame(
             session, ws,
             payload={
