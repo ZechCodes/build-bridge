@@ -16,6 +16,7 @@ import logging
 import os
 import signal
 import socket
+import sys
 import struct
 import time
 from dataclasses import dataclass, field
@@ -342,11 +343,10 @@ async def main_with_watchdog(
             await run_daemon(base_url, reset=reset, agent_port=agent_port)
             break  # Clean exit — don't restart.
         except _RestartRequested:
-            log.info("Restart requested, restarting...")
-            backoff = INITIAL_BACKOFF_S
-            # Don't reset on subsequent runs.
-            reset = False
-            continue
+            log.info("Restart requested, re-execing process to pick up code changes...")
+            # Re-exec the process so all Python modules are re-imported
+            # from the latest source on disk.
+            os.execv(sys.executable, [sys.executable] + sys.argv)
         except SystemExit:
             raise
         except KeyboardInterrupt:

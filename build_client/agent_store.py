@@ -154,6 +154,7 @@ class AgentStore:
             "ALTER TABLE chat_messages ADD COLUMN metadata TEXT",
             "ALTER TABLE agent_channels ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE agent_channels ADD COLUMN session_start_at TEXT",
+            "ALTER TABLE complications ADD COLUMN changed_at REAL",
         ):
             try:
                 self.db.execute(stmt)
@@ -514,12 +515,13 @@ class AgentStore:
         kind: str,
         data: dict[str, Any],
         options: list[dict[str, Any]],
+        changed_at: float | None = None,
     ) -> None:
         """Upsert a complication payload."""
         self.db.execute(
-            "INSERT OR REPLACE INTO complications (id, channel_id, kind, data, options, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (comp_id, channel_id, kind, json.dumps(data), json.dumps(options), now_iso()),
+            "INSERT OR REPLACE INTO complications (id, channel_id, kind, data, options, updated_at, changed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (comp_id, channel_id, kind, json.dumps(data), json.dumps(options), now_iso(), changed_at),
         )
         self.db.commit()
 
@@ -536,6 +538,7 @@ class AgentStore:
                 "data": json.loads(r["data"]),
                 "options": json.loads(r["options"]),
                 "updated_at": r["updated_at"],
+                "changed_at": r["changed_at"],
             }
             for r in rows
         ]
@@ -551,6 +554,7 @@ class AgentStore:
                 "data": json.loads(r["data"]),
                 "options": json.loads(r["options"]),
                 "updated_at": r["updated_at"],
+                "changed_at": r["changed_at"],
             }
             for r in rows
         ]

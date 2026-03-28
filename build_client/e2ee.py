@@ -1026,6 +1026,14 @@ class E2EEHandler:
         channel_id = payload.get("channel_id")
         if not channel_id:
             return
+
+        if not self._agent_server or not self._agent_spawner:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": "agent not available"},
+            )
+            return
+
         timestamp = self._agent_server.store.reset_session(channel_id)
         worker = await self._agent_spawner.restart(channel_id)
         await self._send_frame(

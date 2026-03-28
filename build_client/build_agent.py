@@ -552,14 +552,29 @@ def make_can_use_tool(wrapper: AgentWrapper):
     return callback
 
 
-def build_agent_options(wrapper: AgentWrapper) -> ClaudeAgentOptions:
-    """Build ClaudeAgentOptions with BAP hooks and Chat MCP tools."""
+def build_agent_options(
+    wrapper: AgentWrapper,
+    system_prompt_append: str = "",
+) -> ClaudeAgentOptions:
+    """Build ClaudeAgentOptions with BAP hooks and Chat MCP tools.
+
+    If *system_prompt_append* is provided it is appended to the default
+    Claude Code system prompt via the ``preset`` mechanism so that chat
+    instructions and session history appear in the system prompt rather
+    than in a user message.
+    """
     tools = make_chat_tools(wrapper)
     mcp_server = create_sdk_mcp_server("build_chat", tools=tools)
 
+    system_prompt = (
+        {"type": "preset", "preset": "claude_code", "append": system_prompt_append}
+        if system_prompt_append
+        else None
+    )
+
     return ClaudeAgentOptions(
         setting_sources=["project"],
-        permission_mode="plan",
+        permission_mode="default",
         can_use_tool=make_can_use_tool(wrapper),
         mcp_servers={"build_chat": mcp_server},
         hooks={
@@ -569,6 +584,7 @@ def build_agent_options(wrapper: AgentWrapper) -> ClaudeAgentOptions:
             "Stop": [HookMatcher(hooks=[make_stop_hook(wrapper)])],
         },
         stderr=_stderr_logger,
+        system_prompt=system_prompt,
     )
 
 
@@ -658,36 +674,85 @@ async def run_agent(
 
     # Build recent history summary for context across sessions.
     def _build_history_context() -> str:
-        if not config or not config.chat_history:
+        if not config:
             return ""
-        # Include the last 20 messages so the agent has conversation context.
-        recent = config.chat_history[-20:]
-        if not recent:
+
+        sections: list[str] = []
+
+        # Include recent chat messages so the agent has conversation context.
+        if config.chat_history:
+            recent_chat = config.chat_history[-20:]
+            if recent_chat:
+                chat_lines = ["Recent conversation history:"]
+                for msg in recent_chat:
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    if len(content) > 300:
+                        content = content[:300] + "..."
+                    chat_lines.append(f"[{role}] {content}")
+                sections.append("\n".join(chat_lines))
+
+        # Include recent activity (tool use, reasoning) so the agent retains
+        # context about what it has already done.
+        if config.activity_history:
+            recent_activity = config.activity_history[-50:]
+            if recent_activity:
+                activity_lines = ["Recent tool and reasoning activity:"]
+                for entry in recent_activity:
+                    entry_type = entry.get("type", "")
+                    if entry_type == "tool_use":
+                        name = entry.get("name", "tool")
+                        tool_input = entry.get("input", {})
+                        # Summarize input to keep context concise.
+                        input_summary = json.dumps(tool_input, default=str)
+                        if len(input_summary) > 200:
+                            input_summary = input_summary[:200] + "..."
+                        activity_lines.append(f"[tool_use] {name}: {input_summary}")
+                    elif entry_type == "tool_result":
+                        content = entry.get("content", "")
+                        is_error = entry.get("is_error", False)
+                        if isinstance(content, str) and len(content) > 200:
+                            content = content[:200] + "..."
+                        status = "error" if is_error else "ok"
+                        activity_lines.append(f"[tool_result ({status})] {content}")
+                    elif entry_type == "text":
+                        text = entry.get("text", "") or entry.get("delta", {}).get("text", "")
+                        if text:
+                            if len(text) > 200:
+                                text = text[:200] + "..."
+                            activity_lines.append(f"[reasoning] {text}")
+                sections.append("\n".join(activity_lines))
+
+        if not sections:
             return ""
-        lines = ["Recent conversation history:"]
-        for msg in recent:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            if len(content) > 300:
-                content = content[:300] + "..."
-            lines.append(f"[{role}] {content}")
-        return "\n".join(lines) + "\n\n"
+        return "\n\n".join(sections) + "\n\n"
 
     try:
         # Outer loop: each iteration is a fresh agent context.
         while True:
-            options = build_agent_options(wrapper)
+            # Inject chat context and session history into the system
+            # prompt so the agent retains context across restarts and
+            # context-window resets.
+            history_ctx = _build_history_context()
+            system_append = chat_context
+            if history_ctx:
+                system_append += history_ctx
+
+            options = build_agent_options(wrapper, system_prompt_append=system_append)
 
             async with ClaudeSDKClient(options=options) as client:
-                # Build initial prompt with history context.
-                history_ctx = _build_history_context()
+                # Build initial prompt (chat context / history now live in
+                # the system prompt, so the user message is just the trigger).
                 if next_prompt:
-                    prompt = chat_context + history_ctx + next_prompt
+                    prompt = next_prompt
                 else:
+                    # Yield to the event loop so forwarded messages from
+                    # the server have a chance to be queued by wrapper.run().
+                    await asyncio.sleep(0)
                     # Check for any queued messages from before we connected.
                     if wrapper.chat_mcp.has_unread:
                         notification = wrapper.chat_mcp.build_unread_notification()
-                        prompt = chat_context + history_ctx + (notification or "Check in with the user.")
+                        prompt = notification or "Check in with the user."
                     else:
                         # No messages — just notify browser and wait.
                         await wrapper.emit_system_message("Agent is ready.")

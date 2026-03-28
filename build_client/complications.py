@@ -369,6 +369,9 @@ class ComplicationRegistry:
         self._active_repos: dict[str, set[str]] = {}  # channel_id -> set of repo paths
         self._poll_task: asyncio.Task[None] | None = None
         self._poll_interval = 30.0  # seconds
+        # Change detection: only bump ordering timestamp when data actually changes.
+        self._last_data: dict[str, str] = {}      # comp_id -> json.dumps(data, sort_keys=True)
+        self._changed_at: dict[str, float] = {}   # comp_id -> unix ms when data last changed
 
     def start_polling(self) -> None:
         """Start the background poll loop."""
@@ -393,12 +396,87 @@ class ComplicationRegistry:
 
     async def _poll_active_repos(self) -> None:
         """Re-evaluate all tracked repos across all channels."""
+        await self._remove_stale_channels()
         for channel_id, repos in list(self._active_repos.items()):
             for repo in list(repos):
                 try:
                     await self._evaluate_and_broadcast(channel_id, repo)
                 except Exception as exc:
                     log.debug("Poll evaluation failed for %s in %s: %s", repo, channel_id, exc)
+
+    async def _remove_stale_channels(self) -> None:
+        """Remove individual complications whose last change is >1hr before their channel's latest activity."""
+        if not self._agent_store:
+            return
+        try:
+            from datetime import datetime, timezone as tz
+            rows = self._agent_store.db.execute(
+                "SELECT channel_id, MAX(created_at) as latest "
+                "FROM activity_log "
+                "WHERE type IN ('tool_use', 'tool_result', 'thinking', 'text') "
+                "GROUP BY channel_id"
+            ).fetchall()
+            if not rows:
+                return
+
+            latest_by_channel: dict[str, float] = {}
+            for r in rows:
+                try:
+                    dt = datetime.fromisoformat(r["latest"])
+                    latest_by_channel[r["channel_id"]] = dt.timestamp() * 1000  # unix ms
+                except (ValueError, TypeError):
+                    continue
+
+            if not latest_by_channel:
+                return
+
+            one_hour_ms = 3_600_000
+
+            for channel_id in list(self._active_repos.keys()):
+                ch_latest = latest_by_channel.get(channel_id)
+                if ch_latest is None:
+                    continue
+                repos_to_remove: list[str] = []
+                for repo in list(self._active_repos.get(channel_id, set())):
+                    comp_id = f"git:{repo}"
+                    changed_at = self._changed_at.get(comp_id)
+                    if changed_at is not None and (ch_latest - changed_at) > one_hour_ms:
+                        repos_to_remove.append(repo)
+                for repo in repos_to_remove:
+                    self._remove_single_complication(channel_id, repo)
+        except Exception as exc:
+            log.debug("Stale channel cleanup failed: %s", exc)
+
+    def _remove_single_complication(self, channel_id: str, repo: str) -> None:
+        """Remove a single complication for a channel and broadcast removal."""
+        comp_id = f"git:{repo}"
+        repos = self._active_repos.get(channel_id)
+        if repos:
+            repos.discard(repo)
+            if not repos:
+                self._active_repos.pop(channel_id, None)
+        self._last_data.pop(comp_id, None)
+        self._changed_at.pop(comp_id, None)
+        if self._agent_store:
+            try:
+                self._agent_store.delete_complication(channel_id, comp_id)
+            except Exception:
+                pass
+        asyncio.create_task(self._broadcast(channel_id, {
+            "action": "complication:remove",
+            "channel_id": channel_id,
+            "id": comp_id,
+        }))
+        # Cancel pending evaluation for this repo.
+        key = f"{channel_id}:{repo}"
+        task = self._pending.pop(key, None)
+        if task:
+            task.cancel()
+
+    def _remove_channel_complications(self, channel_id: str) -> None:
+        """Remove all complications for a channel."""
+        for repo in list(self._active_repos.get(channel_id, set())):
+            self._remove_single_complication(channel_id, repo)
 
     async def on_tool_event(
         self,
@@ -452,6 +530,13 @@ class ComplicationRegistry:
         except asyncio.CancelledError:
             self._pending.pop(key, None)
 
+    def _has_data_changed(self, comp_id: str, data_dict: dict[str, Any]) -> bool:
+        """Return True if data differs from last broadcast for this comp_id."""
+        serialized = json.dumps(data_dict, sort_keys=True)
+        previous = self._last_data.get(comp_id)
+        self._last_data[comp_id] = serialized
+        return previous is None or previous != serialized
+
     async def _evaluate_and_broadcast(self, channel_id: str, repo: str) -> None:
         """Evaluate git status and broadcast the complication."""
         try:
@@ -459,12 +544,22 @@ class ComplicationRegistry:
             options = build_git_options(data)
             data_dict = _git_status_to_dict(data)
             comp_id = f"git:{repo}"
+            now_ms = time.time() * 1000
+
+            if self._has_data_changed(comp_id, data_dict):
+                self._changed_at[comp_id] = now_ms
+
+            changed_at = self._changed_at.get(comp_id, now_ms)
+            stable = (now_ms - changed_at) < 300_000  # 5 minutes
+
             msg: dict[str, Any] = {
                 "action": "complication:update",
                 "channel_id": channel_id,
                 "id": comp_id,
                 "kind": "git-status",
-                "timestamp": time.time() * 1000,
+                "timestamp": changed_at,
+                "changed_at": changed_at,
+                "stable": stable,
                 "data": data_dict,
                 "options": options,
             }
@@ -474,6 +569,7 @@ class ComplicationRegistry:
                 try:
                     self._agent_store.save_complication(
                         channel_id, comp_id, "git-status", data_dict, options,
+                        changed_at=changed_at,
                     )
                 except Exception as exc:
                     log.debug("Failed to persist complication %s: %s", comp_id, exc)
@@ -519,15 +615,23 @@ class ComplicationRegistry:
                 for comp in store.get_all_complications():
                     channel_id = comp["channel_id"]
                     comp_id = comp["id"]
+                    now_ms = time.time() * 1000
+                    changed_at = comp.get("changed_at") or now_ms
+                    stable = (now_ms - changed_at) < 300_000
                     results.append({
                         "action": "complication:update",
                         "channel_id": channel_id,
                         "id": comp_id,
                         "kind": comp["kind"],
-                        "timestamp": time.time() * 1000,
+                        "timestamp": changed_at,
+                        "changed_at": changed_at,
+                        "stable": stable,
                         "data": comp["data"],
                         "options": comp["options"],
                     })
+                    # Seed change-detection state from persisted data.
+                    self._last_data[comp_id] = json.dumps(comp["data"], sort_keys=True)
+                    self._changed_at[comp_id] = changed_at
                     # Seed _active_repos from persisted complication ids.
                     if comp_id.startswith("git:"):
                         repo = comp_id[4:]
@@ -561,12 +665,18 @@ class ComplicationRegistry:
                     data = await evaluate_git_status(repo)
                     options = build_git_options(data)
                     data_dict = _git_status_to_dict(data)
+                    now_ms = time.time() * 1000
+                    # First evaluation — mark as changed now.
+                    self._has_data_changed(comp_id, data_dict)
+                    self._changed_at[comp_id] = now_ms
                     results.append({
                         "action": "complication:update",
                         "channel_id": channel_id,
                         "id": comp_id,
                         "kind": "git-status",
-                        "timestamp": time.time() * 1000,
+                        "timestamp": now_ms,
+                        "changed_at": now_ms,
+                        "stable": True,
                         "data": data_dict,
                         "options": options,
                     })
@@ -575,6 +685,7 @@ class ComplicationRegistry:
                         try:
                             store.save_complication(
                                 channel_id, comp_id, "git-status", data_dict, options,
+                                changed_at=now_ms,
                             )
                         except Exception:
                             pass
@@ -589,7 +700,12 @@ class ComplicationRegistry:
 
     def remove_channel(self, channel_id: str) -> None:
         """Clean up tracking for a removed channel."""
-        self._active_repos.pop(channel_id, None)
+        repos = self._active_repos.pop(channel_id, set())
+        # Clean up change-detection state.
+        for repo in repos:
+            comp_id = f"git:{repo}"
+            self._last_data.pop(comp_id, None)
+            self._changed_at.pop(comp_id, None)
         # Cancel any pending evaluations for this channel.
         to_cancel = [k for k in self._pending if k.startswith(f"{channel_id}:")]
         for key in to_cancel:
