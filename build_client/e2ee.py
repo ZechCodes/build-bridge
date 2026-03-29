@@ -99,6 +99,7 @@ class E2EEHandler:
             payload.get("event_type", "?"), len(sessions), channel_id[:8],
         )
 
+        dead_sessions: list[str] = []
         for session in sessions:
             try:
                 await self._send_frame(session, self._relay_ws, payload=payload)
@@ -107,6 +108,13 @@ class E2EEHandler:
                     "Failed to broadcast to session %s: %s",
                     session.session_id[:12], exc,
                 )
+                dead_sessions.append(session.session_id)
+
+        # Clean up dead sessions to prevent error spam.
+        for sid in dead_sessions:
+            self._sessions.pop(sid, None)
+        if dead_sessions:
+            log.info("Removed %d dead session(s)", len(dead_sessions))
 
     async def handle_message(self, msg: dict[str, Any], ws: Any) -> None:
         """Dispatch incoming WS messages from the server."""
@@ -604,9 +612,6 @@ class E2EEHandler:
             except Exception as exc:
                 log.error("Failed to fetch activity history: %s", exc)
 
-        # Count total tool_uses before trimming for the console counter.
-        total_tool_uses = sum(1 for e in entries if e["type"] == "tool_use")
-
         # Trim to the most recent N tool_use entries (plus their results) so
         # the encrypted envelope stays under the relay's 256 KB size limit.
         if entries:
@@ -636,7 +641,6 @@ class E2EEHandler:
                 "action": "activity_history",
                 "channel_id": channel_id,
                 "entries": entries,
-                "total_tool_uses": total_tool_uses,
             },
         )
 
@@ -1282,7 +1286,7 @@ class E2EEHandler:
             proc = await asyncio.create_subprocess_shell(
                 wrapped,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd if os.path.isdir(cwd) else None,
             )
         except Exception as exc:
@@ -1296,29 +1300,91 @@ class E2EEHandler:
             })
             return
 
-        # Stream stdout and stderr concurrently.
+        # Stream output with batching to prevent flooding the E2EE channel.
+        # Output is buffered and flushed every _BATCH_INTERVAL_S or when
+        # the buffer exceeds _BATCH_MAX_BYTES (whichever comes first).
+        _BATCH_INTERVAL_S = 0.1
+        _BATCH_MAX_BYTES = 16_384
+
         collected_out: list[str] = []
+        _batch_buf: list[str] = []
+        _batch_lock = asyncio.Lock()
 
-        async def _stream(stream: asyncio.StreamReader, name: str) -> None:
-            while True:
-                line = await stream.readline()
-                if not line:
-                    break
-                text = line.decode("utf-8", errors="replace")
-                collected_out.append(text)
-                await self._send_frame(session, ws, payload={
-                    "action": "terminal_output",
-                    "channel_id": channel_id,
-                    "stream": name,
-                    "data": text,
-                    "done": False,
-                })
+        async def _flush_batch() -> None:
+            async with _batch_lock:
+                if not _batch_buf:
+                    return
+                data = "".join(_batch_buf)
+                _batch_buf.clear()
+            # Cap size — keep the tail (most recent output matters).
+            if len(data) > _BATCH_MAX_BYTES:
+                data = data[-_BATCH_MAX_BYTES:]
+            await self._send_frame(session, ws, payload={
+                "action": "terminal_output",
+                "channel_id": channel_id,
+                "data": data,
+                "done": False,
+            })
 
-        await asyncio.gather(
-            _stream(proc.stdout, "stdout"),
-            _stream(proc.stderr, "stderr"),
+        async def _batch_timer() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(_BATCH_INTERVAL_S)
+                    await _flush_batch()
+            except asyncio.CancelledError:
+                await _flush_batch()
+
+        # Detect TUI/ncurses apps that need a real terminal emulator.
+        # These use escape sequences like alternate screen buffer, cursor
+        # addressing, or screen clear — none of which work in our text output.
+        import re
+        _TUI_PATTERN = re.compile(
+            rb"\x1b\[\?1049[hl]"   # Alternate screen buffer
+            rb"|\x1b\[\?25[hl]"    # Cursor show/hide
+            rb"|\x1b\[2J"          # Clear entire screen
+            rb"|\x1b\[\d+;\d+H"   # Cursor addressing (row;col)
         )
-        exit_code = await proc.wait()
+        _tui_killed = False
+
+        async def _read_output() -> None:
+            nonlocal _tui_killed
+            while True:
+                chunk = await proc.stdout.read(4096)
+                if not chunk:
+                    break
+                # Kill TUI apps — they can't render in our text terminal.
+                if not _tui_killed and _TUI_PATTERN.search(chunk):
+                    _tui_killed = True
+                    log.warning("TUI application detected on channel %s, killing", channel_id[:8])
+                    proc.kill()
+                    return
+                text = chunk.decode("utf-8", errors="replace")
+                collected_out.append(text)
+                async with _batch_lock:
+                    _batch_buf.append(text)
+
+        timer_task = asyncio.create_task(_batch_timer())
+        try:
+            await _read_output()
+            exit_code = await proc.wait()
+        finally:
+            timer_task.cancel()
+            try:
+                await timer_task
+            except asyncio.CancelledError:
+                pass
+
+        # If a TUI app was killed, send an error message.
+        if _tui_killed:
+            await self._send_frame(session, ws, payload={
+                "action": "terminal_output",
+                "channel_id": channel_id,
+                "data": "\r\nError: This command requires a full terminal emulator (TUI) which is not supported in the web console.\r\n",
+                "done": True,
+                "exit_code": 1,
+                "cwd": cwd,
+            })
+            return
 
         # Extract cwd from sentinel line.
         result_cwd = cwd
