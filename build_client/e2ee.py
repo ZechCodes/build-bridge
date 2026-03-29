@@ -295,7 +295,7 @@ class E2EEHandler:
             channel_list.append(entry)
         await self._send_frame(
             session, ws,
-            payload={"action": "channel_list", "channels": channel_list},
+            payload={"action": "channel_list", "channels": channel_list, "agent_cwd": os.getcwd()},
         )
 
         # Send current complications so the browser has state immediately.
