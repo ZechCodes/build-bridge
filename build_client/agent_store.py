@@ -444,6 +444,7 @@ class AgentStore:
         options: list[dict[str, Any]],
         allow_freeform: bool,
         plan: str | None = None,
+        multiselect: bool = False,
     ) -> ChatMessage:
         """Store an interaction request as an assistant chat message with metadata."""
         now = now_iso()
@@ -453,6 +454,7 @@ class AgentStore:
             "options": options,
             "allow_freeform": allow_freeform,
             "plan": plan,
+            "multiselect": multiselect,
         })
         self.db.execute(
             "INSERT OR REPLACE INTO chat_messages (id, channel_id, role, content, created_at, metadata) "
@@ -472,6 +474,7 @@ class AgentStore:
         channel_id: str,
         selected_option: str | None,
         freeform_response: str | None,
+        selected_options: list[str] | None = None,
     ) -> None:
         """Mark an interaction as resolved and store the user's response."""
         now = now_iso()
@@ -482,6 +485,7 @@ class AgentStore:
         if row and row["metadata"]:
             meta = json.loads(row["metadata"])
             meta["selected_option"] = selected_option
+            meta["selected_options"] = selected_options
             meta["freeform_response"] = freeform_response
             meta["resolved_at"] = now
             self.db.execute(
@@ -489,7 +493,10 @@ class AgentStore:
                 (json.dumps(meta), interaction_id),
             )
         # Store user response as a message.
-        response_text = freeform_response or selected_option or ""
+        if selected_options:
+            response_text = freeform_response or ", ".join(selected_options)
+        else:
+            response_text = freeform_response or selected_option or ""
         response_id = f"{interaction_id}_resp"
         self.db.execute(
             "INSERT OR REPLACE INTO chat_messages (id, channel_id, role, content, created_at) "

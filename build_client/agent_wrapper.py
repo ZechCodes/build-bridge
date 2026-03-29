@@ -435,6 +435,7 @@ class AgentWrapper:
         options: list[dict[str, Any]] | None = None,
         allow_freeform: bool = True,
         plan: str | None = None,
+        multiselect: bool = False,
     ) -> None:
         """Emit interaction.request — agent is asking the user a question."""
         envelope = make_envelope(INTERACTION_REQUEST, {
@@ -444,6 +445,7 @@ class AgentWrapper:
             "options": options or [],
             "allow_freeform": allow_freeform,
             "plan": plan,
+            "multiselect": multiselect,
         })
         await self._send(envelope)
 
@@ -467,12 +469,14 @@ class AgentWrapper:
         options: list[dict[str, Any]] | None = None,
         allow_freeform: bool = True,
         plan: str | None = None,
+        multiselect: bool = False,
     ) -> dict[str, Any]:
         """Emit interaction request and block until the user responds.
 
         Blocks indefinitely — the interaction is cancelled only when the user
         sends a new message, the agent disconnects, or shutdown is requested.
         Returns dict with ``selected_option`` and/or ``freeform_response``.
+        For multiselect interactions, returns ``selected_options`` (list).
         """
         event = asyncio.Event()
         result: dict[str, Any] = {}
@@ -481,6 +485,7 @@ class AgentWrapper:
         try:
             await self.emit_interaction_request(
                 interaction_id, question, kind, options, allow_freeform, plan,
+                multiselect,
             )
             await event.wait()
             return result

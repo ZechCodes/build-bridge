@@ -1216,6 +1216,7 @@ class E2EEHandler:
         interaction_id = payload.get("interaction_id", "")
         selected_option = payload.get("selected_option")
         freeform_response = payload.get("freeform_response")
+        selected_options = payload.get("selected_options")
 
         if not channel_id or not interaction_id:
             log.warning("interaction_response missing channel_id or interaction_id")
@@ -1225,12 +1226,14 @@ class E2EEHandler:
         if self._agent_server:
             self._agent_server.store.resolve_interaction(
                 interaction_id, channel_id, selected_option, freeform_response,
+                selected_options=selected_options,
             )
 
         # Forward to agent.
         if self._agent_server:
             sent = await self._agent_server.send_interaction_response(
                 channel_id, interaction_id, selected_option, freeform_response,
+                selected_options=selected_options,
             )
             if sent:
                 log.info("Forwarded interaction.response to agent on channel %s", channel_id[:8])

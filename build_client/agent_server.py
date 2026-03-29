@@ -215,6 +215,7 @@ class AgentServer:
         interaction_id: str,
         selected_option: str | None,
         freeform_response: str | None,
+        selected_options: list[str] | None = None,
     ) -> bool:
         """Forward an interaction response to the agent on a channel."""
         agent_id = self._channel_to_agent.get(channel_id)
@@ -228,6 +229,7 @@ class AgentServer:
             "interaction_id": interaction_id,
             "selected_option": selected_option,
             "freeform_response": freeform_response,
+            "selected_options": selected_options,
         })
         try:
             await agent.ws.send(json.dumps(envelope))
@@ -775,10 +777,12 @@ class AgentServer:
         options = payload.get("options", [])
         allow_freeform = payload.get("allow_freeform", True)
         plan = payload.get("plan")
+        multiselect = payload.get("multiselect", False)
 
         # Persist as a chat message with metadata.
         self.store.store_interaction(
             interaction_id, agent.channel_id, question, kind, options, allow_freeform, plan,
+            multiselect=multiselect,
         )
 
         # Broadcast to browser (include sender name).
