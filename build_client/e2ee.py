@@ -1410,19 +1410,23 @@ class E2EEHandler:
     ) -> None:
         """Kill the running terminal process on a channel."""
         channel_id = payload.get("channel_id", "")
-        log.info("Terminal kill requested for channel %s (tracked procs: %s)",
-                 channel_id[:8], list(self._terminal_procs.keys())[:5])
-        proc = self._terminal_procs.get(channel_id)
+        log.info("Terminal kill requested for channel %s", channel_id[:8])
+        proc = self._terminal_procs.pop(channel_id, None)
         if proc and proc.returncode is None:
             log.info("Killing terminal process on channel %s (pid=%s)", channel_id[:8], proc.pid)
             try:
                 proc.kill()
             except ProcessLookupError:
                 pass
-        elif proc:
-            log.info("Terminal process on channel %s already exited (rc=%s)", channel_id[:8], proc.returncode)
-        else:
-            log.warning("No terminal process found for channel %s", channel_id[:8])
+        # Always send a done frame to unstick the browser terminal.
+        await self._send_frame(session, ws, payload={
+            "action": "terminal_output",
+            "channel_id": channel_id,
+            "data": "^C\r\n",
+            "done": True,
+            "exit_code": 130,
+            "cwd": "",
+        })
 
     # ---- File Upload Handling ----
 
