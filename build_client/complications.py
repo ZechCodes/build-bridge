@@ -99,16 +99,17 @@ def invalidate_git_repo_cache() -> None:
     find_git_repo.cache_clear()
 
 
-async def _run_git(repo: str, args: list[str], timeout: float = 10.0) -> tuple[str, bool]:
+async def _run_git(repo: str, args: list[str], timeout: float = 10.0, stdin_data: bytes | None = None) -> tuple[str, bool]:
     """Run a git command in the given repo. Returns (stdout, success)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "git", *args,
             cwd=repo,
+            stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(input=stdin_data), timeout=timeout)
         return stdout.decode().strip(), proc.returncode == 0
     except (asyncio.TimeoutError, FileNotFoundError, OSError) as exc:
         log.debug("git %s failed in %s: %s", " ".join(args), repo, exc)

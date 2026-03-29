@@ -21,6 +21,7 @@ from build_secure_transport import (
     open_session_init,
 )
 
+from build_client.complications import _run_git, find_git_repo
 from build_client.config import DeviceConfig
 from build_client.harness_registry import detect_installed, get_harness, serialize_harnesses
 from build_client.storage import MessageStore
@@ -67,6 +68,22 @@ class E2EEHandler:
                 if harness_info:
                     return harness_info.name
         return "device"
+
+    def _resolve_safe_path(self, base_dir: str, relative_path: str) -> str | None:
+        """Resolve relative_path under base_dir. Returns None if it escapes."""
+        base = Path(base_dir).resolve()
+        target = (base / relative_path).resolve()
+        if target != base and not str(target).startswith(str(base) + os.sep):
+            return None
+        return str(target)
+
+    def _get_channel_cwd(self, channel_id: str) -> str:
+        """Get working directory for a channel, falling back to process cwd."""
+        if self._agent_server:
+            ch = self._agent_server.store.get_channel(channel_id)
+            if ch and ch.working_directory:
+                return ch.working_directory
+        return os.getcwd()
 
     def set_agent_server(self, server: AgentServer) -> None:
         """Register the agent server for forwarding chat messages."""
@@ -273,6 +290,12 @@ class E2EEHandler:
             await self._handle_terminal_kill(session, payload, ws)
         elif action == "terminal_complete":
             await self._handle_terminal_complete(session, payload, ws)
+        elif action == "files_list":
+            await self._handle_files_list(session, payload, ws)
+        elif action == "file_read":
+            await self._handle_file_read(session, payload, ws)
+        elif action == "file_diff":
+            await self._handle_file_diff(session, payload, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -1259,6 +1282,390 @@ class E2EEHandler:
                     session, ws, channel_id,
                     "Failed to send response to agent. The agent may have disconnected.",
                 )
+
+    # ---- Files View ----
+
+    _MAX_FILE_READ = 100_000  # ~100KB text, stays under 256KB encrypted envelope
+    _BINARY_CHECK_SIZE = 8192
+    _MAX_DIFF_SIZE = 100_000
+    _MAX_DIR_ENTRIES = 1000
+
+    @staticmethod
+    def _parse_porcelain_status(output: str) -> dict[str, tuple[str, str]]:
+        """Parse git status --porcelain=v1 output.
+
+        Returns {relative_path: (staged_status, unstaged_status)}.
+        """
+        result: dict[str, tuple[str, str]] = {}
+        for line in output.splitlines():
+            if len(line) < 4:
+                continue
+            x, y = line[0], line[1]
+            path = line[3:]
+            # Handle renames: "R  old -> new"
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1]
+            result[path] = (x, y)
+        return result
+
+    @staticmethod
+    def _parse_numstat_per_file(output: str) -> dict[str, tuple[int, int]]:
+        """Parse git diff --numstat into {path: (insertions, deletions)}."""
+        result: dict[str, tuple[int, int]] = {}
+        for line in output.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            ins_s, dels_s, path = parts[0], parts[1], parts[2]
+            if ins_s == "-":  # binary
+                result[path] = (0, 0)
+                continue
+            try:
+                result[path] = (int(ins_s), int(dels_s))
+            except ValueError:
+                continue
+        return result
+
+    async def _handle_files_list(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """List directory contents with git metadata."""
+        channel_id = payload.get("channel_id", "")
+        rel_path = payload.get("path", "")
+        if not channel_id:
+            return
+
+        cwd = self._get_channel_cwd(channel_id)
+        resolved = self._resolve_safe_path(cwd, rel_path) if rel_path else cwd
+        if resolved is None:
+            await self._send_frame(session, ws, payload={
+                "action": "error",
+                "channel_id": channel_id,
+                "error": "Path outside working directory",
+            })
+            return
+
+        if not os.path.isdir(resolved):
+            await self._send_frame(session, ws, payload={
+                "action": "files_list_result",
+                "channel_id": channel_id,
+                "path": rel_path,
+                "error": "Not a directory",
+                "entries": [],
+            })
+            return
+
+        # Scan directory entries.
+        try:
+            raw_entries: list[dict[str, Any]] = []
+            with os.scandir(resolved) as it:
+                for entry in it:
+                    try:
+                        is_dir = entry.is_dir(follow_symlinks=True)
+                        is_symlink = entry.is_symlink()
+                        # Skip symlinks that escape the working directory.
+                        if is_symlink:
+                            link_target = str(Path(entry.path).resolve())
+                            base_resolved = str(Path(cwd).resolve())
+                            if link_target != base_resolved and not link_target.startswith(base_resolved + os.sep):
+                                continue
+                        stat = entry.stat(follow_symlinks=True)
+                        entry_rel = os.path.join(rel_path, entry.name) if rel_path else entry.name
+                        raw_entries.append({
+                            "name": entry.name,
+                            "path": entry_rel,
+                            "type": "dir" if is_dir else "file",
+                            "size": stat.st_size if not is_dir else 0,
+                            "modified": stat.st_mtime,
+                            "git_status": None,
+                            "staged_status": None,
+                            "insertions": 0,
+                            "deletions": 0,
+                            "is_gitignored": False,
+                        })
+                    except OSError:
+                        continue
+        except OSError as exc:
+            await self._send_frame(session, ws, payload={
+                "action": "files_list_result",
+                "channel_id": channel_id,
+                "path": rel_path,
+                "error": str(exc),
+                "entries": [],
+            })
+            return
+
+        # Sort: directories first, then alphabetical.
+        raw_entries.sort(key=lambda e: (0 if e["type"] == "dir" else 1, e["name"].lower()))
+
+        truncated = len(raw_entries) > self._MAX_DIR_ENTRIES
+        if truncated:
+            raw_entries = raw_entries[:self._MAX_DIR_ENTRIES]
+
+        # Enrich with git metadata if inside a git repo.
+        repo = find_git_repo(resolved)
+        if repo:
+            repo_root = Path(repo).resolve()
+            # Relative path from repo root to the listed directory.
+            try:
+                dir_rel_to_repo = str(Path(resolved).resolve().relative_to(repo_root))
+                if dir_rel_to_repo == ".":
+                    dir_rel_to_repo = ""
+            except ValueError:
+                dir_rel_to_repo = ""
+
+            # Build paths for check-ignore.
+            entry_abs_paths = [os.path.join(resolved, e["name"]) for e in raw_entries]
+            stdin_data = "\n".join(entry_abs_paths).encode() if entry_abs_paths else b""
+
+            # Run git commands concurrently.
+            status_task = _run_git(repo, ["status", "--porcelain=v1", "--", resolved])
+            numstat_task = _run_git(repo, ["diff", "--numstat", "--", resolved])
+            numstat_cached_task = _run_git(repo, ["diff", "--cached", "--numstat", "--", resolved])
+            async def _noop_git() -> tuple[str, bool]:
+                return ("", False)
+            ignore_task = _run_git(repo, ["check-ignore", "--stdin"], stdin_data=stdin_data) if stdin_data else _noop_git()
+
+            results = await asyncio.gather(
+                status_task, numstat_task, numstat_cached_task, ignore_task,
+                return_exceptions=True,
+            )
+
+            status_out = results[0] if not isinstance(results[0], BaseException) else ("", False)
+            numstat_out = results[1] if not isinstance(results[1], BaseException) else ("", False)
+            numstat_cached_out = results[2] if not isinstance(results[2], BaseException) else ("", False)
+            ignore_out = results[3] if not isinstance(results[3], BaseException) else ("", False)
+
+            status_map = self._parse_porcelain_status(status_out[0])
+            numstat_map = self._parse_numstat_per_file(numstat_out[0])
+            numstat_cached_map = self._parse_numstat_per_file(numstat_cached_out[0])
+            ignored_set = {line.strip() for line in ignore_out[0].splitlines() if line.strip()} if ignore_out[0] else set()
+
+            for entry in raw_entries:
+                # Compute path relative to repo root for git status matching.
+                entry_repo_rel = os.path.join(dir_rel_to_repo, entry["name"]) if dir_rel_to_repo else entry["name"]
+
+                # Git status --porcelain paths are relative to repo root.
+                if entry_repo_rel in status_map:
+                    staged, unstaged = status_map[entry_repo_rel]
+                    entry["staged_status"] = staged if staged.strip() else None
+                    entry["git_status"] = unstaged if unstaged.strip() else None
+                else:
+                    # For directories, check if any child has status.
+                    if entry["type"] == "dir":
+                        prefix = entry_repo_rel + "/"
+                        has_staged = has_unstaged = False
+                        for p, (s, u) in status_map.items():
+                            if p.startswith(prefix):
+                                if s.strip():
+                                    has_staged = True
+                                if u.strip():
+                                    has_unstaged = True
+                                if has_staged and has_unstaged:
+                                    break
+                        if has_staged:
+                            entry["staged_status"] = "M"
+                        if has_unstaged:
+                            entry["git_status"] = "M"
+
+                # Numstat — insertions/deletions.
+                ins, dels = 0, 0
+                if entry_repo_rel in numstat_map:
+                    i, d = numstat_map[entry_repo_rel]
+                    ins += i
+                    dels += d
+                if entry_repo_rel in numstat_cached_map:
+                    i, d = numstat_cached_map[entry_repo_rel]
+                    ins += i
+                    dels += d
+                # For directories, sum children.
+                if entry["type"] == "dir":
+                    prefix = entry_repo_rel + "/"
+                    for p, (i, d) in numstat_map.items():
+                        if p.startswith(prefix):
+                            ins += i
+                            dels += d
+                    for p, (i, d) in numstat_cached_map.items():
+                        if p.startswith(prefix):
+                            ins += i
+                            dels += d
+                entry["insertions"] = ins
+                entry["deletions"] = dels
+
+                # Gitignored.
+                entry_abs = os.path.join(resolved, entry["name"])
+                entry["is_gitignored"] = entry_abs in ignored_set
+
+        await self._send_frame(session, ws, payload={
+            "action": "files_list_result",
+            "channel_id": channel_id,
+            "path": rel_path,
+            "entries": raw_entries,
+            "truncated": truncated,
+        })
+
+    async def _handle_file_read(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Read file contents for the viewer."""
+        channel_id = payload.get("channel_id", "")
+        rel_path = payload.get("path", "")
+        offset = payload.get("offset", 0)
+        limit = min(payload.get("limit", self._MAX_FILE_READ), self._MAX_FILE_READ)
+        if not channel_id or not rel_path:
+            return
+
+        cwd = self._get_channel_cwd(channel_id)
+        resolved = self._resolve_safe_path(cwd, rel_path)
+        if resolved is None:
+            await self._send_frame(session, ws, payload={
+                "action": "error",
+                "channel_id": channel_id,
+                "error": "Path outside working directory",
+            })
+            return
+
+        try:
+            stat = os.stat(resolved)
+        except OSError as exc:
+            await self._send_frame(session, ws, payload={
+                "action": "file_read_result",
+                "channel_id": channel_id,
+                "path": rel_path,
+                "error": str(exc),
+            })
+            return
+
+        file_size = stat.st_size
+
+        # Binary detection: check first 8KB for null bytes.
+        try:
+            with open(resolved, "rb") as f:
+                header = f.read(self._BINARY_CHECK_SIZE)
+        except OSError as exc:
+            await self._send_frame(session, ws, payload={
+                "action": "file_read_result",
+                "channel_id": channel_id,
+                "path": rel_path,
+                "error": str(exc),
+            })
+            return
+
+        is_binary = b"\x00" in header
+
+        if is_binary:
+            await self._send_frame(session, ws, payload={
+                "action": "file_read_result",
+                "channel_id": channel_id,
+                "path": rel_path,
+                "content": None,
+                "size": file_size,
+                "offset": 0,
+                "truncated": False,
+                "encoding": None,
+                "is_binary": True,
+            })
+            return
+
+        # Text file: read from offset up to limit bytes.
+        try:
+            with open(resolved, "rb") as f:
+                if offset > 0:
+                    f.seek(offset)
+                raw = f.read(limit)
+        except OSError as exc:
+            await self._send_frame(session, ws, payload={
+                "action": "file_read_result",
+                "channel_id": channel_id,
+                "path": rel_path,
+                "error": str(exc),
+            })
+            return
+
+        content = raw.decode("utf-8", errors="replace")
+
+        await self._send_frame(session, ws, payload={
+            "action": "file_read_result",
+            "channel_id": channel_id,
+            "path": rel_path,
+            "content": content,
+            "size": file_size,
+            "offset": offset,
+            "truncated": file_size > offset + limit,
+            "encoding": "utf-8",
+            "is_binary": False,
+        })
+
+    async def _handle_file_diff(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Get git diff for a file."""
+        channel_id = payload.get("channel_id", "")
+        rel_path = payload.get("path", "")
+        staged = payload.get("staged", False)
+        if not channel_id or not rel_path:
+            return
+
+        cwd = self._get_channel_cwd(channel_id)
+        resolved = self._resolve_safe_path(cwd, rel_path)
+        if resolved is None:
+            await self._send_frame(session, ws, payload={
+                "action": "error",
+                "channel_id": channel_id,
+                "error": "Path outside working directory",
+            })
+            return
+
+        repo = find_git_repo(resolved)
+        if not repo:
+            await self._send_frame(session, ws, payload={
+                "action": "file_diff_result",
+                "channel_id": channel_id,
+                "path": rel_path,
+                "staged": staged,
+                "diff": "",
+                "truncated": False,
+            })
+            return
+
+        # Compute path relative to repo root.
+        try:
+            file_repo_rel = str(Path(resolved).resolve().relative_to(Path(repo).resolve()))
+        except ValueError:
+            file_repo_rel = rel_path
+
+        if staged:
+            diff_out, ok = await _run_git(repo, ["diff", "--cached", "--", file_repo_rel])
+        else:
+            diff_out, ok = await _run_git(repo, ["diff", "--", file_repo_rel])
+
+        # If no diff and the file might be untracked, generate a synthetic diff.
+        if not diff_out:
+            status_out, _ = await _run_git(repo, ["status", "--porcelain=v1", "--", file_repo_rel])
+            if status_out.startswith("??"):
+                diff_out, _ = await _run_git(repo, ["diff", "--no-index", "/dev/null", file_repo_rel])
+
+        truncated = len(diff_out) > self._MAX_DIFF_SIZE
+        if truncated:
+            diff_out = diff_out[:self._MAX_DIFF_SIZE]
+
+        await self._send_frame(session, ws, payload={
+            "action": "file_diff_result",
+            "channel_id": channel_id,
+            "path": rel_path,
+            "staged": staged,
+            "diff": diff_out,
+            "truncated": truncated,
+        })
 
     # ---- Terminal Execution ----
 
