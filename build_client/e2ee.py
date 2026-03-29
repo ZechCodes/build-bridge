@@ -271,6 +271,8 @@ class E2EEHandler:
             asyncio.create_task(self._handle_terminal_exec(session, payload, ws))
         elif action == "terminal_kill":
             await self._handle_terminal_kill(session, payload, ws)
+        elif action == "terminal_complete":
+            await self._handle_terminal_complete(session, payload, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -1429,6 +1431,96 @@ class E2EEHandler:
         if cmd_id:
             done_payload["command_id"] = cmd_id
         await self._send_frame(session, ws, payload=done_payload)
+
+    # ---- Terminal Tab Completion ----
+
+    async def _handle_terminal_complete(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Return tab-completion candidates for the browser terminal."""
+        channel_id = payload.get("channel_id", "")
+        partial = payload.get("partial", "")  # the current word being completed
+        line = payload.get("line", "")  # full input line
+        cwd = payload.get("cwd", "")
+
+        if not channel_id:
+            return
+
+        # Resolve cwd.
+        if not cwd and self._agent_server:
+            ch = self._agent_server.store.get_channel(channel_id)
+            if ch and ch.working_directory:
+                cwd = ch.working_directory
+        if not cwd:
+            cwd = os.getcwd()
+        cwd = os.path.expanduser(os.path.expandvars(cwd))
+
+        # Determine completion type: if the partial is the first word on the line
+        # (i.e., it's a command), complete commands+files; otherwise just files/dirs.
+        line_before = line.strip()
+        words = line_before.split()
+        is_command_position = len(words) <= 1 and partial == line_before
+
+        candidates: list[str] = []
+        try:
+            if is_command_position:
+                # Complete commands + files/dirs in cwd.
+                # Use compgen -c for commands and compgen -f for files.
+                script = (
+                    f'cd {shlex.quote(cwd)} 2>/dev/null; '
+                    f'compgen -c -- {shlex.quote(partial)} 2>/dev/null; '
+                    f'compgen -f -- {shlex.quote(partial)} 2>/dev/null'
+                )
+            else:
+                # Complete files/dirs relative to cwd.
+                script = (
+                    f'cd {shlex.quote(cwd)} 2>/dev/null; '
+                    f'compgen -f -- {shlex.quote(partial)} 2>/dev/null'
+                )
+
+            proc = await asyncio.create_subprocess_exec(
+                "bash", "-c", script,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=cwd if os.path.isdir(cwd) else None,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+            raw = stdout.decode("utf-8", errors="replace").strip()
+            if raw:
+                seen: set[str] = set()
+                for entry in raw.splitlines():
+                    entry = entry.strip()
+                    if entry and entry not in seen:
+                        seen.add(entry)
+                        candidates.append(entry)
+
+            # Mark directories with trailing slash.
+            enriched: list[str] = []
+            for c in candidates:
+                # Resolve against cwd to check if it's a directory.
+                full = os.path.join(cwd, c) if not os.path.isabs(c) else c
+                if os.path.isdir(full):
+                    enriched.append(c.rstrip("/") + "/")
+                else:
+                    enriched.append(c)
+            candidates = enriched
+
+        except (asyncio.TimeoutError, Exception) as exc:
+            log.debug("Tab completion failed: %s", exc)
+            candidates = []
+
+        # Cap results to avoid huge payloads.
+        candidates = candidates[:100]
+
+        await self._send_frame(session, ws, payload={
+            "action": "terminal_completions",
+            "channel_id": channel_id,
+            "partial": partial,
+            "completions": candidates,
+        })
 
     # ---- File Upload Handling ----
 
