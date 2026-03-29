@@ -82,7 +82,7 @@ class E2EEHandler:
         if self._agent_server:
             ch = self._agent_server.store.get_channel(channel_id)
             if ch and ch.working_directory:
-                return ch.working_directory
+                return os.path.expanduser(ch.working_directory)
         return os.getcwd()
 
     def set_agent_server(self, server: AgentServer) -> None:
