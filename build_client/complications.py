@@ -85,10 +85,11 @@ FILE_MUTATION_TOOLS = frozenset({"Edit", "Write", "Bash"})
 def find_git_repo(file_path: str) -> str | None:
     """Walk up from file_path to find a .git directory."""
     try:
-        for parent in Path(file_path).resolve().parents:
-            git_path = parent / ".git"
-            if git_path.is_dir():
-                return str(parent)
+        p = Path(file_path).resolve()
+        # Check the path itself first, then walk up parents.
+        for candidate in [p, *p.parents]:
+            if (candidate / ".git").is_dir():
+                return str(candidate)
     except (OSError, ValueError):
         pass
     return None
