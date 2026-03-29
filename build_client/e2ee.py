@@ -53,6 +53,7 @@ class E2EEHandler:
         self._relay_ws: Any = None  # Current relay WS connection
         self._agent_server: AgentServer | None = None
         self._agent_spawner: AgentSpawner | None = None
+        self._terminal_procs: dict[str, asyncio.subprocess.Process] = {}  # channel_id -> running proc
 
     def _get_agent_name(self, channel_id: str) -> str:
         """Get the display name for the agent on a channel (e.g., 'Claude Code').
@@ -264,6 +265,8 @@ class E2EEHandler:
             await self._cancel_agent(session, payload, ws)
         elif action == "terminal_exec":
             await self._handle_terminal_exec(session, payload, ws)
+        elif action == "terminal_kill":
+            await self._handle_terminal_kill(session, payload, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -1289,6 +1292,7 @@ class E2EEHandler:
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd if os.path.isdir(cwd) else None,
             )
+            self._terminal_procs[channel_id] = proc
         except Exception as exc:
             await self._send_frame(session, ws, payload={
                 "action": "terminal_output",
@@ -1364,6 +1368,7 @@ class E2EEHandler:
                 await timer_task
             except asyncio.CancelledError:
                 pass
+            self._terminal_procs.pop(channel_id, None)
 
         # If the process was killed due to no output, send an error.
         if _output_stalled:
@@ -1392,6 +1397,22 @@ class E2EEHandler:
             "exit_code": exit_code,
             "cwd": result_cwd,
         })
+
+    async def _handle_terminal_kill(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Kill the running terminal process on a channel."""
+        channel_id = payload.get("channel_id", "")
+        proc = self._terminal_procs.get(channel_id)
+        if proc and proc.returncode is None:
+            log.info("Killing terminal process on channel %s (pid=%s)", channel_id[:8], proc.pid)
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
 
     # ---- File Upload Handling ----
 
