@@ -1269,6 +1269,26 @@ class E2EEHandler:
         if not channel_id or not command:
             return
 
+        # Block TUI/interactive apps that require a real terminal emulator.
+        # These hang or break when run without a PTY.
+        _TUI_COMMANDS = frozenset({
+            "nvim", "vim", "vi", "nano", "emacs", "pico", "micro",
+            "top", "htop", "btop", "less", "more", "man",
+            "tmux", "screen", "mc", "ranger", "nnn",
+            "ssh", "ftp", "telnet",
+        })
+        first_word = command.split()[0].split("/")[-1] if command.split() else ""
+        if first_word in _TUI_COMMANDS:
+            await self._send_frame(session, ws, payload={
+                "action": "terminal_output",
+                "channel_id": channel_id,
+                "data": f"Error: '{first_word}' requires a full terminal emulator and cannot run in the web console.\n",
+                "done": True,
+                "exit_code": 1,
+                "cwd": payload.get("cwd", ""),
+            })
+            return
+
         # Fall back to channel's working directory if no cwd provided.
         if not cwd and self._agent_server:
             ch = self._agent_server.store.get_channel(channel_id)
