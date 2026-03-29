@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import shlex
 import shutil
 import uuid
 from dataclasses import dataclass, field
@@ -253,6 +254,8 @@ class E2EEHandler:
             await self._mark_seen(session, payload, ws)
         elif action == "cancel":
             await self._cancel_agent(session, payload, ws)
+        elif action == "terminal_exec":
+            await self._handle_terminal_exec(session, payload, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -1243,6 +1246,95 @@ class E2EEHandler:
                     session, ws, channel_id,
                     "Failed to send response to agent. The agent may have disconnected.",
                 )
+
+    # ---- Terminal Execution ----
+
+    _SENTINEL = "__BUILD_CWD__"
+
+    async def _handle_terminal_exec(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Execute a shell command and stream output back to the browser."""
+        channel_id = payload.get("channel_id", "")
+        command = payload.get("command", "").strip()
+        cwd = payload.get("cwd", "")
+
+        if not channel_id or not command:
+            return
+
+        # Fall back to channel's working directory if no cwd provided.
+        if not cwd and self._agent_server:
+            ch = self._agent_server.store.get_channel(channel_id)
+            if ch and ch.working_directory:
+                cwd = ch.working_directory
+        if not cwd:
+            cwd = str(Path.home())
+
+        cwd = os.path.expanduser(os.path.expandvars(cwd))
+
+        # Wrap command to capture resulting cwd after execution.
+        wrapped = f'cd {shlex.quote(cwd)} && ({command})\n__exit=$?\necho "{self._SENTINEL}$(pwd)"\nexit $__exit'
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                wrapped,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd if os.path.isdir(cwd) else None,
+            )
+        except Exception as exc:
+            await self._send_frame(session, ws, payload={
+                "action": "terminal_output",
+                "channel_id": channel_id,
+                "data": f"Failed to execute: {exc}\n",
+                "done": True,
+                "exit_code": 1,
+                "cwd": cwd,
+            })
+            return
+
+        # Stream stdout and stderr concurrently.
+        collected_out: list[str] = []
+
+        async def _stream(stream: asyncio.StreamReader, name: str) -> None:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace")
+                collected_out.append(text)
+                await self._send_frame(session, ws, payload={
+                    "action": "terminal_output",
+                    "channel_id": channel_id,
+                    "stream": name,
+                    "data": text,
+                    "done": False,
+                })
+
+        await asyncio.gather(
+            _stream(proc.stdout, "stdout"),
+            _stream(proc.stderr, "stderr"),
+        )
+        exit_code = await proc.wait()
+
+        # Extract cwd from sentinel line.
+        result_cwd = cwd
+        for line in reversed(collected_out):
+            stripped = line.strip()
+            if stripped.startswith(self._SENTINEL):
+                result_cwd = stripped[len(self._SENTINEL):]
+                break
+
+        await self._send_frame(session, ws, payload={
+            "action": "terminal_output",
+            "channel_id": channel_id,
+            "done": True,
+            "exit_code": exit_code,
+            "cwd": result_cwd,
+        })
 
     # ---- File Upload Handling ----
 
