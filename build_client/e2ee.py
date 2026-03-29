@@ -1271,7 +1271,7 @@ class E2EEHandler:
             if ch and ch.working_directory:
                 cwd = ch.working_directory
         if not cwd:
-            cwd = str(Path.home())
+            cwd = os.getcwd()
 
         cwd = os.path.expanduser(os.path.expandvars(cwd))
 
