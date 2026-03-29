@@ -1269,26 +1269,6 @@ class E2EEHandler:
         if not channel_id or not command:
             return
 
-        # Block TUI/interactive apps that require a real terminal emulator.
-        # These hang or break when run without a PTY.
-        _TUI_COMMANDS = frozenset({
-            "nvim", "vim", "vi", "nano", "emacs", "pico", "micro",
-            "top", "htop", "btop", "less", "more", "man",
-            "tmux", "screen", "mc", "ranger", "nnn",
-            "ssh", "ftp", "telnet",
-        })
-        first_word = command.split()[0].split("/")[-1] if command.split() else ""
-        if first_word in _TUI_COMMANDS:
-            await self._send_frame(session, ws, payload={
-                "action": "terminal_output",
-                "channel_id": channel_id,
-                "data": f"Error: '{first_word}' requires a full terminal emulator and cannot run in the web console.\n",
-                "done": True,
-                "exit_code": 1,
-                "cwd": payload.get("cwd", ""),
-            })
-            return
-
         # Fall back to channel's working directory if no cwd provided.
         if not cwd and self._agent_server:
             ch = self._agent_server.store.get_channel(channel_id)
@@ -1354,30 +1334,21 @@ class E2EEHandler:
             except asyncio.CancelledError:
                 await _flush_batch()
 
-        # Detect TUI/ncurses apps that need a real terminal emulator.
-        # These use escape sequences like alternate screen buffer, cursor
-        # addressing, or screen clear — none of which work in our text output.
-        import re
-        _TUI_PATTERN = re.compile(
-            rb"\x1b\[\?1049[hl]"   # Alternate screen buffer
-            rb"|\x1b\[\?25[hl]"    # Cursor show/hide
-            rb"|\x1b\[2J"          # Clear entire screen
-            rb"|\x1b\[\d+;\d+H"   # Cursor addressing (row;col)
-        )
-        _tui_killed = False
+        _NO_OUTPUT_TIMEOUT_S = 30.0
+        _output_stalled = False
 
         async def _read_output() -> None:
-            nonlocal _tui_killed
+            nonlocal _output_stalled
             while True:
-                chunk = await proc.stdout.read(4096)
-                if not chunk:
-                    break
-                # Kill TUI apps — they can't render in our text terminal.
-                if not _tui_killed and _TUI_PATTERN.search(chunk):
-                    _tui_killed = True
-                    log.warning("TUI application detected on channel %s, killing", channel_id[:8])
+                try:
+                    chunk = await asyncio.wait_for(proc.stdout.read(4096), timeout=_NO_OUTPUT_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    _output_stalled = True
+                    log.warning("No output for %.0fs on channel %s, killing process", _NO_OUTPUT_TIMEOUT_S, channel_id[:8])
                     proc.kill()
                     return
+                if not chunk:
+                    break
                 text = chunk.decode("utf-8", errors="replace")
                 collected_out.append(text)
                 async with _batch_lock:
@@ -1394,12 +1365,12 @@ class E2EEHandler:
             except asyncio.CancelledError:
                 pass
 
-        # If a TUI app was killed, send an error message.
-        if _tui_killed:
+        # If the process was killed due to no output, send an error.
+        if _output_stalled:
             await self._send_frame(session, ws, payload={
                 "action": "terminal_output",
                 "channel_id": channel_id,
-                "data": "\r\nError: This command requires a full terminal emulator (TUI) which is not supported in the web console.\r\n",
+                "data": "\r\nError: Command produced no output for 30 seconds and was killed. This may be an interactive/TUI application that requires a full terminal emulator.\r\n",
                 "done": True,
                 "exit_code": 1,
                 "cwd": cwd,
