@@ -249,6 +249,8 @@ class E2EEHandler:
             await self._compact_session(session, payload, ws)
         elif action == "mark_seen":
             await self._mark_seen(session, payload, ws)
+        elif action == "cancel":
+            await self._cancel_agent(session, payload, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -971,6 +973,31 @@ class E2EEHandler:
                 "action": "agent_stopped",
                 "channel_id": channel_id,
                 "was_running": stopped,
+            },
+        )
+
+    async def _cancel_agent(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Send chat.cancel to the running agent on a channel."""
+        channel_id = payload.get("channel_id", "")
+        if not channel_id:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": "channel_id required"},
+            )
+            return
+
+        sent = await self.agent_server.send_cancel(channel_id)
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "cancel_ack",
+                "channel_id": channel_id,
+                "sent": sent,
             },
         )
 
