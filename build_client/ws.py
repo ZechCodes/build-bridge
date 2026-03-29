@@ -152,7 +152,7 @@ async def run_connection(
         log.info("Connecting to %s ...", ws_url)
 
         try:
-            async with ws_connect(ws_url, additional_headers=headers) as ws:
+            async with ws_connect(ws_url, additional_headers=headers, max_size=2 * 1024 * 1024) as ws:
                 # Wait for the authenticated message to get heartbeat interval.
                 raw = await asyncio.wait_for(ws.recv(), timeout=10)
                 msg = json.loads(raw)

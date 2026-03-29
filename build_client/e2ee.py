@@ -1563,7 +1563,8 @@ class E2EEHandler:
             # Check if it's an image we can preview.
             image_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp"}
             ext = os.path.splitext(resolved)[1].lower()
-            if ext in image_exts and file_size <= 75_000:
+            max_image_size = 10 * 1024 * 1024  # 10 MB
+            if ext in image_exts and file_size <= max_image_size:
                 import base64
                 import mimetypes
                 mime = mimetypes.guess_type(str(resolved))[0] or "image/png"
@@ -1571,18 +1572,26 @@ class E2EEHandler:
                     with open(resolved, "rb") as f:
                         raw = f.read()
                     b64 = base64.b64encode(raw).decode("ascii")
-                    await self._send_frame(session, ws, payload={
-                        "action": "file_read_result",
-                        "channel_id": channel_id,
-                        "path": rel_path,
-                        "content": f"data:{mime};base64,{b64}",
-                        "size": file_size,
-                        "offset": 0,
-                        "truncated": False,
-                        "encoding": "base64",
-                        "is_binary": True,
-                        "is_image": True,
-                    })
+                    data_uri = f"data:{mime};base64,{b64}"
+
+                    # Send in chunks to stay within WS frame limits.
+                    chunk_size = 500_000  # ~500KB per chunk (base64 text)
+                    chunks = [data_uri[i:i + chunk_size] for i in range(0, len(data_uri), chunk_size)]
+                    for idx, chunk in enumerate(chunks):
+                        await self._send_frame(session, ws, payload={
+                            "action": "file_read_result",
+                            "channel_id": channel_id,
+                            "path": rel_path,
+                            "content": chunk,
+                            "size": file_size,
+                            "offset": 0,
+                            "truncated": False,
+                            "encoding": "base64",
+                            "is_binary": True,
+                            "is_image": True,
+                            "chunk_index": idx,
+                            "chunk_total": len(chunks),
+                        })
                     return
                 except OSError:
                     pass  # Fall through to generic binary message.
