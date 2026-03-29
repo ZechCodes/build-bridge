@@ -216,6 +216,8 @@ class E2EEHandler:
         """Process a decrypted data frame — dispatch by payload type."""
         payload = frame.get("payload") or {}
         action = payload.get("action", "message")
+        if action not in ("list_channels", "get_messages", "get_activity", "get_complications", "message"):
+            log.info("E2EE action: %s (channel=%s)", action, payload.get("channel_id", "?")[:8])
 
         if action == "list_channels":
             await self._send_channel_list(session, ws)
@@ -264,7 +266,9 @@ class E2EEHandler:
         elif action == "cancel":
             await self._cancel_agent(session, payload, ws)
         elif action == "terminal_exec":
-            await self._handle_terminal_exec(session, payload, ws)
+            # Run as background task so the handler doesn't block
+            # processing of other frames (e.g., terminal_kill).
+            asyncio.create_task(self._handle_terminal_exec(session, payload, ws))
         elif action == "terminal_kill":
             await self._handle_terminal_kill(session, payload, ws)
         else:
@@ -1406,6 +1410,8 @@ class E2EEHandler:
     ) -> None:
         """Kill the running terminal process on a channel."""
         channel_id = payload.get("channel_id", "")
+        log.info("Terminal kill requested for channel %s (tracked procs: %s)",
+                 channel_id[:8], list(self._terminal_procs.keys())[:5])
         proc = self._terminal_procs.get(channel_id)
         if proc and proc.returncode is None:
             log.info("Killing terminal process on channel %s (pid=%s)", channel_id[:8], proc.pid)
@@ -1413,6 +1419,10 @@ class E2EEHandler:
                 proc.kill()
             except ProcessLookupError:
                 pass
+        elif proc:
+            log.info("Terminal process on channel %s already exited (rc=%s)", channel_id[:8], proc.returncode)
+        else:
+            log.warning("No terminal process found for channel %s", channel_id[:8])
 
     # ---- File Upload Handling ----
 
