@@ -1296,7 +1296,9 @@ class E2EEHandler:
         cwd = os.path.expanduser(os.path.expandvars(cwd))
 
         # Wrap command to capture resulting cwd after execution.
-        wrapped = f'cd {shlex.quote(cwd)} && ({command})\n__exit=$?\necho "{self._SENTINEL}$(pwd)"\nexit $__exit'
+        # NOTE: Do NOT wrap {command} in parentheses — that creates a subshell
+        # which prevents `cd` from propagating to the pwd capture below.
+        wrapped = f'cd {shlex.quote(cwd)} && {command}\n__exit=$?\necho "{self._SENTINEL}$(pwd)"\nexit $__exit'
 
         try:
             proc = await asyncio.create_subprocess_shell(
