@@ -231,6 +231,14 @@ class AgentStore:
         )
         self.db.commit()
 
+    def update_working_directory(self, channel_id: str, working_directory: str) -> None:
+        """Update a channel's working directory."""
+        self.db.execute(
+            "UPDATE agent_channels SET working_directory = ?, updated_at = ? WHERE id = ?",
+            (working_directory, now_iso(), channel_id),
+        )
+        self.db.commit()
+
     def touch_channel(self, channel_id: str) -> None:
         """Update a channel's updated_at timestamp."""
         self.db.execute(

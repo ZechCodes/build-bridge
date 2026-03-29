@@ -229,6 +229,8 @@ class E2EEHandler:
             await self._restart_agent(session, payload, ws)
         elif action == "rename_channel":
             await self._rename_channel(session, payload, ws)
+        elif action == "update_channel":
+            await self._update_channel(session, payload, ws)
         elif action == "delete_channel":
             await self._delete_channel(session, payload, ws)
         elif action == "list_workers":
@@ -269,6 +271,7 @@ class E2EEHandler:
                     entry["model"] = agent_ch.model
                     info = get_harness(agent_ch.harness)
                     entry["agent_name"] = info.name if info else "Device"
+                    entry["working_directory"] = agent_ch.working_directory
                     entry["plan_mode"] = agent_ch.plan_mode
                     entry["last_seen_at"] = agent_ch.last_seen_at
             channel_list.append(entry)
@@ -381,6 +384,35 @@ class E2EEHandler:
                 "action": "channel_renamed",
                 "channel_id": channel_id,
                 "name": name,
+            },
+        )
+
+    async def _update_channel(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Update channel settings (e.g. working directory)."""
+        channel_id = payload.get("channel_id", "")
+        if not channel_id:
+            await self._send_frame(
+                session, ws,
+                payload={"action": "error", "error": "channel_id required"},
+            )
+            return
+
+        working_directory = payload.get("working_directory")
+        if working_directory is not None and self._agent_server:
+            self._agent_server.store.update_working_directory(channel_id, working_directory)
+            log.info("Updated working_directory for channel %s", channel_id[:8])
+
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "channel_updated",
+                "channel_id": channel_id,
+                "working_directory": working_directory,
             },
         )
 
