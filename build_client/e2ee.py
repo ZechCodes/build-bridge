@@ -53,7 +53,7 @@ class E2EEHandler:
         self._relay_ws: Any = None  # Current relay WS connection
         self._agent_server: AgentServer | None = None
         self._agent_spawner: AgentSpawner | None = None
-        self._terminal_procs: dict[str, asyncio.subprocess.Process] = {}  # channel_id -> running proc
+        self._terminal_procs: dict[str, tuple[asyncio.subprocess.Process, str]] = {}  # channel_id -> (proc, command_id)
 
     def _get_agent_name(self, channel_id: str) -> str:
         """Get the display name for the agent on a channel (e.g., 'Claude Code').
@@ -1271,10 +1271,19 @@ class E2EEHandler:
         """Execute a shell command and stream output back to the browser."""
         channel_id = payload.get("channel_id", "")
         command = payload.get("command", "").strip()
+        command_id = payload.get("command_id", "")
         cwd = payload.get("cwd", "")
 
         if not channel_id or not command:
             return
+
+        def _term_payload(**fields: Any) -> dict[str, Any]:
+            """Build a terminal_output payload with channel_id and command_id."""
+            p: dict[str, Any] = {"action": "terminal_output", "channel_id": channel_id}
+            if command_id:
+                p["command_id"] = command_id
+            p.update(fields)
+            return p
 
         # Fall back to channel's working directory if no cwd provided.
         if not cwd and self._agent_server:
@@ -1296,16 +1305,11 @@ class E2EEHandler:
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd if os.path.isdir(cwd) else None,
             )
-            self._terminal_procs[channel_id] = proc
+            self._terminal_procs[channel_id] = (proc, command_id)
         except Exception as exc:
-            await self._send_frame(session, ws, payload={
-                "action": "terminal_output",
-                "channel_id": channel_id,
-                "data": f"Failed to execute: {exc}\n",
-                "done": True,
-                "exit_code": 1,
-                "cwd": cwd,
-            })
+            await self._send_frame(session, ws, payload=_term_payload(
+                data=f"Failed to execute: {exc}\n", done=True, exit_code=1, cwd=cwd,
+            ))
             return
 
         # Stream output with batching to prevent flooding the E2EE channel.
@@ -1327,12 +1331,9 @@ class E2EEHandler:
             # Cap size — keep the tail (most recent output matters).
             if len(data) > _BATCH_MAX_BYTES:
                 data = data[-_BATCH_MAX_BYTES:]
-            await self._send_frame(session, ws, payload={
-                "action": "terminal_output",
-                "channel_id": channel_id,
-                "data": data,
-                "done": False,
-            })
+            await self._send_frame(session, ws, payload=_term_payload(
+                data=data, done=False,
+            ))
 
         async def _batch_timer() -> None:
             try:
@@ -1376,14 +1377,10 @@ class E2EEHandler:
 
         # If the process was killed due to no output, send an error.
         if _output_stalled:
-            await self._send_frame(session, ws, payload={
-                "action": "terminal_output",
-                "channel_id": channel_id,
-                "data": "\r\nError: Command produced no output for 30 seconds and was killed. This may be an interactive/TUI application that requires a full terminal emulator.\r\n",
-                "done": True,
-                "exit_code": 1,
-                "cwd": cwd,
-            })
+            await self._send_frame(session, ws, payload=_term_payload(
+                data="\r\nError: Command produced no output for 30 seconds and was killed. This may be an interactive/TUI application that requires a full terminal emulator.\r\n",
+                done=True, exit_code=1, cwd=cwd,
+            ))
             return
 
         # Extract cwd from sentinel line.
@@ -1394,13 +1391,9 @@ class E2EEHandler:
                 result_cwd = stripped[len(self._SENTINEL):]
                 break
 
-        await self._send_frame(session, ws, payload={
-            "action": "terminal_output",
-            "channel_id": channel_id,
-            "done": True,
-            "exit_code": exit_code,
-            "cwd": result_cwd,
-        })
+        await self._send_frame(session, ws, payload=_term_payload(
+            done=True, exit_code=exit_code, cwd=result_cwd,
+        ))
 
     async def _handle_terminal_kill(
         self,
@@ -1411,22 +1404,29 @@ class E2EEHandler:
         """Kill the running terminal process on a channel."""
         channel_id = payload.get("channel_id", "")
         log.info("Terminal kill requested for channel %s", channel_id[:8])
-        proc = self._terminal_procs.pop(channel_id, None)
-        if proc and proc.returncode is None:
-            log.info("Killing terminal process on channel %s (pid=%s)", channel_id[:8], proc.pid)
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+        entry = self._terminal_procs.pop(channel_id, None)
+        if entry:
+            proc, cmd_id = entry
+            if proc.returncode is None:
+                log.info("Killing terminal process on channel %s (pid=%s)", channel_id[:8], proc.pid)
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+        else:
+            cmd_id = payload.get("command_id", "")
         # Always send a done frame to unstick the browser terminal.
-        await self._send_frame(session, ws, payload={
+        done_payload: dict[str, Any] = {
             "action": "terminal_output",
             "channel_id": channel_id,
             "data": "^C\r\n",
             "done": True,
             "exit_code": 130,
             "cwd": "",
-        })
+        }
+        if cmd_id:
+            done_payload["command_id"] = cmd_id
+        await self._send_frame(session, ws, payload=done_payload)
 
     # ---- File Upload Handling ----
 
