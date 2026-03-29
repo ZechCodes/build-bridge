@@ -219,7 +219,7 @@ class TestBuildAgentOptions:
         assert "PostToolUse" in options.hooks
         assert "Stop" in options.hooks
         assert "PreCompact" in options.hooks
-        assert options.permission_mode == "plan"
+        assert options.permission_mode == "default"
 
 
 class TestChatContext:
