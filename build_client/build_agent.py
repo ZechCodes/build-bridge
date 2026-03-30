@@ -92,6 +92,9 @@ CHAT_CONTEXT = (
     "need user input. The user will see a prompt in their browser.\n"
     "- Plan mode (EnterPlanMode/ExitPlanMode) works through the remote UI — "
     "plan approval is handled by the browser interface.\n\n"
+    "You have access to 'send' and 'read_unread' MCP tools for communicating "
+    "with the user. Use 'read_unread' to check for user messages and 'send' "
+    "to reply. Do not output user-facing text directly — always use the send tool.\n\n"
 )
 
 
@@ -279,7 +282,16 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
             tool_input,
         )
 
-        return {"continue_": True}
+        # Inject unread message reminder so agent checks messages promptly.
+        result: dict = {"continue_": True}
+        unread = wrapper.chat_mcp.unread_count
+        if unread > 0:
+            noun = "message" if unread == 1 else "messages"
+            result["systemMessage"] = (
+                f"You have {unread} unread {noun} from the user. "
+                f"Use the read_unread tool to read it."
+            )
+        return result
 
     return hook
 
@@ -429,6 +441,18 @@ def make_post_tool_hook(wrapper: AgentWrapper):
             tool_name=tool_name,
         )
 
+        # Inject unread message reminder via systemMessage so the agent
+        # is aware of pending user messages during long tool chains.
+        unread = wrapper.chat_mcp.unread_count
+        if unread > 0:
+            return {
+                "systemMessage": (
+                    f"REMINDER: The user cannot see your text responses. "
+                    f"Use mcp__build_chat__send to communicate what you're going "
+                    f"to do and what you've done."
+                ),
+            }
+
         return {}
 
     return hook
@@ -452,7 +476,9 @@ def make_pre_compact_hook(wrapper: AgentWrapper):
         "The user CANNOT see your text responses. The ONLY way to communicate "
         "with the user is by calling the mcp__build_chat__send tool. "
         "Always use mcp__build_chat__send to tell the user what you're going "
-        "to do and what you've done."
+        "to do and what you've done. "
+        "When you see REMINDER notes about unread messages, read them promptly "
+        "with mcp__build_chat__read_unread."
     )
 
     async def hook(input_data, tool_use_id, context):
