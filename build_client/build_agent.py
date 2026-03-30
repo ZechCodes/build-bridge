@@ -641,9 +641,16 @@ async def run_agent(
 
     # Create wrapper and connect to device client.
     cancel_event = asyncio.Event()
+    active_client: list[ClaudeSDKClient | None] = [None]
 
     async def on_cancel():
         cancel_event.set()
+        client = active_client[0]
+        if client:
+            try:
+                await client.interrupt()
+            except Exception:
+                pass
 
     wrapper = AgentWrapper(
         port=port,
@@ -741,6 +748,7 @@ async def run_agent(
             options = build_agent_options(wrapper, system_prompt_append=system_append)
 
             async with ClaudeSDKClient(options=options) as client:
+                active_client[0] = client
                 # Build initial prompt (chat context / history now live in
                 # the system prompt, so the user message is just the trigger).
                 if next_prompt:
@@ -794,6 +802,7 @@ async def run_agent(
                         async for message in client.receive_response():
                             await handle_response_message(message, wrapper)
 
+            active_client[0] = None
             # Client exited — log and decide whether to loop.
             log.info("Agent context ended (%s)", exit_reason)
 
