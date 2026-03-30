@@ -292,6 +292,8 @@ class E2EEHandler:
             await self._handle_terminal_complete(session, payload, ws)
         elif action == "files_list":
             await self._handle_files_list(session, payload, ws)
+        elif action == "files_changes":
+            await self._handle_files_changes(session, payload, ws)
         elif action == "file_read":
             await self._handle_file_read(session, payload, ws)
         elif action == "file_diff":
@@ -1505,6 +1507,91 @@ class E2EEHandler:
             "path": rel_path,
             "entries": raw_entries,
             "truncated": truncated,
+        })
+
+    async def _handle_files_changes(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Return all changed files across the entire repo."""
+        channel_id = payload.get("channel_id", "")
+        if not channel_id:
+            return
+
+        cwd = self._get_channel_cwd(channel_id)
+        repo = find_git_repo(cwd)
+        if not repo:
+            await self._send_frame(session, ws, payload={
+                "action": "files_changes_result",
+                "channel_id": channel_id,
+                "entries": [],
+            })
+            return
+
+        repo_root = Path(repo).resolve()
+        cwd_resolved = Path(cwd).resolve()
+
+        # Run git status and numstat for the whole repo.
+        status_task = _run_git(repo, ["status", "--porcelain=v1"])
+        numstat_task = _run_git(repo, ["diff", "--numstat"])
+        numstat_cached_task = _run_git(repo, ["diff", "--cached", "--numstat"])
+
+        results = await asyncio.gather(
+            status_task, numstat_task, numstat_cached_task,
+            return_exceptions=True,
+        )
+
+        status_out = results[0] if not isinstance(results[0], BaseException) else ("", False)
+        numstat_out = results[1] if not isinstance(results[1], BaseException) else ("", False)
+        numstat_cached_out = results[2] if not isinstance(results[2], BaseException) else ("", False)
+
+        status_map = self._parse_porcelain_status(status_out[0])
+        numstat_map = self._parse_numstat_per_file(numstat_out[0])
+        numstat_cached_map = self._parse_numstat_per_file(numstat_cached_out[0])
+
+        # Collect all unique changed file paths.
+        all_paths = set(status_map.keys()) | set(numstat_map.keys()) | set(numstat_cached_map.keys())
+
+        entries: list[dict[str, Any]] = []
+        for repo_rel in sorted(all_paths):
+            # Convert repo-relative path to cwd-relative path.
+            abs_path = repo_root / repo_rel
+            try:
+                cwd_rel = str(abs_path.relative_to(cwd_resolved))
+            except ValueError:
+                # File is outside the channel's cwd — skip it.
+                continue
+
+            staged, unstaged = status_map.get(repo_rel, (" ", " "))
+            ins, dels = 0, 0
+            if repo_rel in numstat_map:
+                i, d = numstat_map[repo_rel]
+                ins += i
+                dels += d
+            if repo_rel in numstat_cached_map:
+                i, d = numstat_cached_map[repo_rel]
+                ins += i
+                dels += d
+
+            entries.append({
+                "name": os.path.basename(repo_rel),
+                "path": cwd_rel,
+                "type": "file",
+                "size": 0,
+                "modified": 0,
+                "git_status": unstaged if unstaged.strip() else None,
+                "staged_status": staged if staged.strip() else None,
+                "insertions": ins,
+                "deletions": dels,
+                "is_gitignored": False,
+            })
+
+        await self._send_frame(session, ws, payload={
+            "action": "files_changes_result",
+            "channel_id": channel_id,
+            "entries": entries,
         })
 
     async def _handle_file_read(
