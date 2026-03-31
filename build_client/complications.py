@@ -111,7 +111,7 @@ async def _run_git(repo: str, args: list[str], timeout: float = 10.0, stdin_data
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(input=stdin_data), timeout=timeout)
-        return stdout.decode().strip(), proc.returncode == 0
+        return stdout.decode().strip('\n'), proc.returncode == 0
     except (asyncio.TimeoutError, FileNotFoundError, OSError) as exc:
         log.debug("git %s failed in %s: %s", " ".join(args), repo, exc)
         return "", False

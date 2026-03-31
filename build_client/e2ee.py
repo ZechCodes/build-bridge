@@ -1654,7 +1654,6 @@ class E2EEHandler:
         )
 
         repos = [r for r in repo_results if isinstance(r, dict)]
-
         await self._send_frame(session, ws, payload={
             "action": "files_changes_result",
             "channel_id": channel_id,
