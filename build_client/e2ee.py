@@ -21,7 +21,7 @@ from build_secure_transport import (
     open_session_init,
 )
 
-from build_client.complications import _run_git, find_git_repo
+from build_client.complications import _run_git, find_git_repo, git_remote_name, git_branch_info
 from build_client.config import DeviceConfig
 from build_client.harness_registry import detect_installed, get_harness, serialize_harnesses
 from build_client.storage import MessageStore
@@ -1509,61 +1509,73 @@ class E2EEHandler:
             "truncated": truncated,
         })
 
-    async def _handle_files_changes(
-        self,
-        session: ActiveSession,
-        payload: dict[str, Any],
-        ws: Any,
-    ) -> None:
-        """Return all changed files across the entire repo."""
-        channel_id = payload.get("channel_id", "")
-        if not channel_id:
-            return
+    def _find_all_git_repos(self, cwd: str) -> list[str]:
+        """Find all git repos at cwd itself and 1-2 levels deep."""
+        repos: list[str] = []
+        cwd_path = Path(cwd).resolve()
 
-        cwd = self._get_channel_cwd(channel_id)
-        repo = find_git_repo(cwd)
-        if not repo:
-            await self._send_frame(session, ws, payload={
-                "action": "files_changes_result",
-                "channel_id": channel_id,
-                "entries": [],
-            })
-            return
+        # Check cwd itself.
+        if (cwd_path / ".git").is_dir():
+            repos.append(str(cwd_path))
 
+        # Scan 1-2 levels deep.
+        try:
+            for entry in os.scandir(cwd_path):
+                if not entry.is_dir(follow_symlinks=False) or entry.name.startswith("."):
+                    continue
+                sub = Path(entry.path)
+                if (sub / ".git").is_dir():
+                    repos.append(str(sub))
+                    continue
+                # Level 2.
+                try:
+                    for entry2 in os.scandir(sub):
+                        if not entry2.is_dir(follow_symlinks=False) or entry2.name.startswith("."):
+                            continue
+                        if (Path(entry2.path) / ".git").is_dir():
+                            repos.append(str(Path(entry2.path)))
+                except (OSError, PermissionError):
+                    pass
+        except (OSError, PermissionError):
+            pass
+
+        return repos
+
+    async def _collect_repo_changes(self, repo: str, cwd: str) -> dict[str, Any] | None:
+        """Collect changed files for a single repo."""
         repo_root = Path(repo).resolve()
         cwd_resolved = Path(cwd).resolve()
 
-        # Run git status and numstat for the whole repo.
-        status_task = _run_git(repo, ["status", "--porcelain=v1"])
-        numstat_task = _run_git(repo, ["diff", "--numstat"])
-        numstat_cached_task = _run_git(repo, ["diff", "--cached", "--numstat"])
-
+        # Get repo metadata and file changes in parallel.
         results = await asyncio.gather(
-            status_task, numstat_task, numstat_cached_task,
+            _run_git(repo, ["status", "--porcelain=v1"]),
+            _run_git(repo, ["diff", "--numstat"]),
+            _run_git(repo, ["diff", "--cached", "--numstat"]),
+            git_remote_name(repo),
+            git_branch_info(repo),
             return_exceptions=True,
         )
 
         status_out = results[0] if not isinstance(results[0], BaseException) else ("", False)
         numstat_out = results[1] if not isinstance(results[1], BaseException) else ("", False)
         numstat_cached_out = results[2] if not isinstance(results[2], BaseException) else ("", False)
+        remote = results[3] if not isinstance(results[3], BaseException) else None
+        branch_info = results[4] if not isinstance(results[4], BaseException) else ("unknown", False, None)
+
+        branch_name, _, _ = branch_info
 
         status_map = self._parse_porcelain_status(status_out[0])
         numstat_map = self._parse_numstat_per_file(numstat_out[0])
         numstat_cached_map = self._parse_numstat_per_file(numstat_cached_out[0])
 
-        # Collect all unique changed file paths.
         all_paths = set(status_map.keys()) | set(numstat_map.keys()) | set(numstat_cached_map.keys())
+        if not all_paths:
+            return None
 
         entries: list[dict[str, Any]] = []
         for repo_rel in sorted(all_paths):
-            # Convert repo-relative path to cwd-relative path.
             abs_path = repo_root / repo_rel
-            try:
-                cwd_rel = str(abs_path.relative_to(cwd_resolved))
-            except ValueError:
-                # File is outside the channel's cwd — skip it.
-                continue
-
+            # Make path relative to the repo root for display.
             staged, unstaged = status_map.get(repo_rel, (" ", " "))
             ins, dels = 0, 0
             if repo_rel in numstat_map:
@@ -1574,6 +1586,12 @@ class E2EEHandler:
                 i, d = numstat_cached_map[repo_rel]
                 ins += i
                 dels += d
+
+            # Path relative to CWD for file operations.
+            try:
+                cwd_rel = str(abs_path.relative_to(cwd_resolved))
+            except ValueError:
+                cwd_rel = repo_rel
 
             entries.append({
                 "name": os.path.basename(repo_rel),
@@ -1588,10 +1606,59 @@ class E2EEHandler:
                 "is_gitignored": False,
             })
 
+        # Repo path relative to cwd for display.
+        try:
+            display_path = str(repo_root.relative_to(cwd_resolved))
+        except ValueError:
+            display_path = str(repo_root)
+
+        return {
+            "path": display_path,
+            "remote": remote,
+            "branch": branch_name,
+            "entries": entries,
+        }
+
+    async def _handle_files_changes(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Return all changed files across all repos in the working directory."""
+        channel_id = payload.get("channel_id", "")
+        if not channel_id:
+            return
+
+        cwd = self._get_channel_cwd(channel_id)
+        repo_paths = self._find_all_git_repos(cwd)
+
+        if not repo_paths:
+            # Fallback: try walking UP (original behavior).
+            repo = find_git_repo(cwd)
+            if repo:
+                repo_paths = [repo]
+
+        if not repo_paths:
+            await self._send_frame(session, ws, payload={
+                "action": "files_changes_result",
+                "channel_id": channel_id,
+                "repos": [],
+            })
+            return
+
+        # Collect changes from all repos in parallel.
+        repo_results = await asyncio.gather(
+            *(self._collect_repo_changes(r, cwd) for r in repo_paths),
+            return_exceptions=True,
+        )
+
+        repos = [r for r in repo_results if isinstance(r, dict)]
+
         await self._send_frame(session, ws, payload={
             "action": "files_changes_result",
             "channel_id": channel_id,
-            "entries": entries,
+            "repos": repos,
         })
 
     async def _handle_file_read(

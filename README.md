@@ -93,3 +93,7 @@ To add a new harness, create a JSON file and a corresponding runtime module in `
 ```bash
 uv run pytest tests/ -v
 ```
+
+## License
+
+MIT
