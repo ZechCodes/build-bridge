@@ -259,6 +259,7 @@ class AgentSpawner:
                 harness=channel.harness,
                 model=channel.model,
                 system_prompt=channel.system_prompt,
+                working_directory=channel.working_directory,
             )
 
         # Restart with same config.
