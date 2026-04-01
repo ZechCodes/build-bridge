@@ -74,7 +74,10 @@ class BuildChatBridgeServer:
         if method == "read_unread":
             return await self._chat_mcp.handle_read_unread()
         if method == "send":
-            return await self._chat_mcp.handle_send(payload.get("message", ""))
+            return await self._chat_mcp.handle_send(
+                payload.get("message", ""),
+                suggested_actions=payload.get("suggested_actions"),
+            )
 
         raise ValueError(f"unknown bridge method: {method}")
 
@@ -132,8 +135,11 @@ def main() -> None:
         name="send",
         description="Send a user-visible message back to the Build browser UI.",
     )
-    async def send(message: str) -> dict[str, Any]:
-        return await bridge.call("send", {"message": message})
+    async def send(message: str, suggested_actions: list[str] | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"message": message}
+        if suggested_actions:
+            payload["suggested_actions"] = suggested_actions
+        return await bridge.call("send", payload)
 
     mcp.run(transport="stdio")
 

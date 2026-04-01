@@ -19,7 +19,7 @@ from typing import Any, Callable, Coroutine
 log = logging.getLogger(__name__)
 
 # Type for the send callback.
-SendCallback = Callable[[str], Coroutine[Any, Any, None]]
+SendCallback = Callable[[str, list[str] | None], Coroutine[Any, Any, None]]
 
 # Supported image MIME types for inline content blocks.
 _IMAGE_MIME_TYPES = frozenset({
@@ -156,14 +156,18 @@ class ChatMCP:
 
         return {"messages": messages}
 
-    async def handle_send(self, message: str) -> dict[str, Any]:
+    async def handle_send(
+        self,
+        message: str,
+        suggested_actions: list[str] | None = None,
+    ) -> dict[str, Any]:
         """MCP tool: send — send a message to the user.
 
         The wrapper translates this into a chat.response protocol message (§8.2).
         The on_send callback is responsible for emitting the BAP message.
         """
         if self._on_send:
-            await self._on_send(message)
+            await self._on_send(message, suggested_actions)
         else:
             log.warning("send called but no on_send callback registered")
 
@@ -319,7 +323,7 @@ class ChatMCP:
                 "to the user's browser."
             ),
         )
-        async def send(message: str) -> dict:
-            return await chat.handle_send(message)
+        async def send(message: str, suggested_actions: list[str] | None = None) -> dict:
+            return await chat.handle_send(message, suggested_actions)
 
         return mcp

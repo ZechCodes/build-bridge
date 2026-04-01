@@ -582,16 +582,20 @@ class AgentServer:
         )
 
         # Notify browser.
+        event: dict[str, Any] = {
+            "id": data["id"],
+            "ref": data.get("ref"),
+            "content": content,
+            "sender": self._agent_display_name(agent),
+        }
+        suggested_actions = payload.get("suggested_actions")
+        if suggested_actions:
+            event["suggested_actions"] = suggested_actions
         await self._notify_browser(agent.channel_id, {
             "action": "agent_event",
             "channel_id": agent.channel_id,
             "event_type": "chat.response",
-            "event": {
-                "id": data["id"],
-                "ref": data.get("ref"),
-                "content": content,
-                "sender": self._agent_display_name(agent),
-            },
+            "event": event,
         })
 
     async def _handle_activity_delta(

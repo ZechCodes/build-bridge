@@ -169,11 +169,25 @@ def make_chat_tools(wrapper: AgentWrapper) -> list:
         "send",
         "Send a message to the user. Use this to communicate with the user "
         "instead of outputting text directly.",
-        {"message": str},
+        {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string"},
+                "suggested_actions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional 2-3 short action labels shown as clickable buttons below the message (e.g. ['yes', 'no']). Clicking one sends it as a user message.",
+                },
+            },
+            "required": ["message"],
+        },
     )
     async def send(args):
         try:
-            result = await wrapper.chat_mcp.handle_send(args["message"])
+            result = await wrapper.chat_mcp.handle_send(
+                args["message"],
+                suggested_actions=args.get("suggested_actions"),
+            )
             return {"content": [{"type": "text", "text": json.dumps(result)}]}
         except (ConnectionError, RuntimeError, OSError) as e:
             log.warning("send tool error: %s", e)

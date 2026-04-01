@@ -515,9 +515,14 @@ class AgentWrapper:
     # Internal
     # -----------------------------------------------------------------
 
-    async def _emit_chat_response(self, message: str) -> None:
+    async def _emit_chat_response(
+        self, message: str, suggested_actions: list[str] | None = None,
+    ) -> None:
         """Handle Chat MCP send tool — emit chat.response to device client."""
-        envelope = make_envelope(CHAT_RESPONSE, {"content": message})
+        payload: dict[str, Any] = {"content": message}
+        if suggested_actions:
+            payload["suggested_actions"] = suggested_actions
+        envelope = make_envelope(CHAT_RESPONSE, payload)
         await self._send(envelope)
         log.debug("Emitted chat.response (%d chars)", len(message))
 
