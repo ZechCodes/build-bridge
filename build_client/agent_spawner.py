@@ -249,26 +249,25 @@ class AgentSpawner:
     async def restart(self, channel_id: str) -> WorkerInfo | None:
         """Restart the agent on a channel using its stored config."""
         worker = self._workers.get(channel_id)
-        if not worker:
-            # Try to restore from DB.
-            channel = self._store.get_channel(channel_id)
-            if not channel:
-                return None
-            return await self.spawn(
-                channel_id=channel_id,
-                harness=channel.harness,
-                model=channel.model,
-                system_prompt=channel.system_prompt,
-                working_directory=channel.working_directory,
-            )
 
-        # Restart with same config.
+        # Always read working_directory from DB — user may have updated it
+        # via the edit modal after the worker was spawned.
+        channel = self._store.get_channel(channel_id)
+
+        if not worker and not channel:
+            return None
+
+        harness = worker.harness if worker else channel.harness
+        model = worker.model if worker else channel.model
+        system_prompt = worker.system_prompt if worker else channel.system_prompt
+        working_directory = channel.working_directory if channel else (worker.working_directory if worker else "")
+
         return await self.spawn(
             channel_id=channel_id,
-            harness=worker.harness,
-            model=worker.model,
-            system_prompt=worker.system_prompt,
-            working_directory=worker.working_directory,
+            harness=harness,
+            model=model,
+            system_prompt=system_prompt,
+            working_directory=working_directory,
         )
 
     # -----------------------------------------------------------------
