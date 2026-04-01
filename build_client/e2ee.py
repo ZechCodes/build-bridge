@@ -548,6 +548,8 @@ class E2EEHandler:
                     }
                     if cm.metadata:
                         msg_dict["metadata"] = cm.metadata
+                    if cm.suggested_actions:
+                        msg_dict["suggested_actions"] = json.loads(cm.suggested_actions)
                     agent_msgs.append(msg_dict)
             except Exception as exc:
                 log.error("Failed to merge agent chat messages: %s", exc)

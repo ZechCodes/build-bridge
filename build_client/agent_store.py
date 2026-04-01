@@ -48,6 +48,7 @@ class ChatMessage:
     content: str  # text or JSON-encoded content block array
     created_at: str
     metadata: str | None = None  # JSON interaction data, NULL for regular messages
+    suggested_actions: str | None = None  # JSON array of action labels, NULL for regular messages
 
 
 @dataclass
@@ -157,6 +158,7 @@ class AgentStore:
             "ALTER TABLE agent_channels ADD COLUMN session_start_at TEXT",
             "ALTER TABLE agent_channels ADD COLUMN last_seen_at TEXT",
             "ALTER TABLE complications ADD COLUMN changed_at REAL",
+            "ALTER TABLE chat_messages ADD COLUMN suggested_actions TEXT",
         ):
             try:
                 self.db.execute(stmt)
@@ -282,16 +284,18 @@ class AgentStore:
         channel_id: str,
         role: str,
         content: str,
+        suggested_actions: list[str] | None = None,
     ) -> ChatMessage:
         """Store a chat message."""
         now = now_iso()
+        sa_json = json.dumps(suggested_actions) if suggested_actions else None
         self.db.execute(
-            "INSERT OR REPLACE INTO chat_messages (id, channel_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-            (msg_id, channel_id, role, content, now),
+            "INSERT OR REPLACE INTO chat_messages (id, channel_id, role, content, created_at, suggested_actions) VALUES (?, ?, ?, ?, ?, ?)",
+            (msg_id, channel_id, role, content, now, sa_json),
         )
         self.db.commit()
         self.touch_channel(channel_id)
-        return ChatMessage(id=msg_id, channel_id=channel_id, role=role, content=content, created_at=now)
+        return ChatMessage(id=msg_id, channel_id=channel_id, role=role, content=content, created_at=now, suggested_actions=sa_json)
 
     def get_chat_history(self, channel_id: str, since: str | None = None) -> list[ChatMessage]:
         """Get chat history for a channel, optionally filtered to messages after `since`."""
@@ -314,6 +318,7 @@ class AgentStore:
             id=row["id"], channel_id=row["channel_id"],
             role=row["role"], content=row["content"], created_at=row["created_at"],
             metadata=row["metadata"] if "metadata" in keys else None,
+            suggested_actions=row["suggested_actions"] if "suggested_actions" in keys else None,
         )
 
     # ----- Activity Log -----

@@ -577,8 +577,10 @@ class AgentServer:
             return  # Don't store or notify browser — compact handler will manage it.
 
         # Store as assistant message.
+        suggested_actions = payload.get("suggested_actions")
         self.store.store_chat_message(
             data["id"], agent.channel_id, "assistant", content,
+            suggested_actions=suggested_actions or None,
         )
 
         # Notify browser.
@@ -588,7 +590,6 @@ class AgentServer:
             "content": content,
             "sender": self._agent_display_name(agent),
         }
-        suggested_actions = payload.get("suggested_actions")
         if suggested_actions:
             event["suggested_actions"] = suggested_actions
         await self._notify_browser(agent.channel_id, {
