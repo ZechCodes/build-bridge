@@ -712,6 +712,14 @@ class AgentServer:
                         diff_out, _ = await _run_git(repo, ["diff", "--no-index", "/dev/null", file_repo_rel])
                 if not diff_out:
                     diff_out, _ = await _run_git(repo, ["diff", "--cached", "--", file_repo_rel])
+                if not diff_out:
+                    # Fall back to diff between last two commits that touched this file.
+                    log_out, _ = await _run_git(repo, ["log", "--pretty=format:%H", "-2", "--", file_repo_rel])
+                    commits = log_out.strip().splitlines()
+                    if len(commits) == 2:
+                        diff_out, _ = await _run_git(repo, ["diff", commits[1], commits[0], "--", file_repo_rel])
+                    elif len(commits) == 1:
+                        diff_out, _ = await _run_git(repo, ["diff", f"{commits[0]}~1", commits[0], "--", file_repo_rel])
                 display_path = rel_path
 
             if not diff_out:
