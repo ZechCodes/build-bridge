@@ -10,8 +10,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Coroutine
 
 import websockets
@@ -49,6 +52,7 @@ from build_client.agent_protocol import (
     validate_envelope,
 )
 from build_client.agent_store import AgentStore
+from build_client.complications import find_git_repo, _run_git
 
 log = logging.getLogger(__name__)
 
@@ -576,6 +580,9 @@ class AgentServer:
             future.set_result(content)
             return  # Don't store or notify browser — compact handler will manage it.
 
+        # Resolve [[file]] and [[diff]] markers into embedded content.
+        content = await self._resolve_file_embeds(agent.channel_id, content)
+
         # Store as assistant message.
         suggested_actions = payload.get("suggested_actions")
         self.store.store_chat_message(
@@ -598,6 +605,146 @@ class AgentServer:
             "event_type": "chat.response",
             "event": event,
         })
+
+    # ---- File / diff embed resolution ----
+
+    _EMBED_FILE_RE = re.compile(r"\[\[file(?:\s+(\d+):(\d+))?\]\]\(([^)]+)\)")
+    _EMBED_DIFF_RE = re.compile(r"\[\[diff\]\]\(([^)]+)\)")
+    _MAX_EMBED_SIZE = 50 * 1024  # 50 KB per embed
+    _MAX_EMBEDS = 10
+
+    def _resolve_safe_path(self, base_dir: str, relative_path: str) -> str | None:
+        """Resolve relative_path under base_dir. Returns None if it escapes."""
+        base = Path(base_dir).resolve()
+        target = (base / relative_path).resolve()
+        if target != base and not str(target).startswith(str(base) + os.sep):
+            return None
+        return str(target)
+
+    async def _resolve_file_embeds(
+        self, channel_id: str, content: str,
+    ) -> str:
+        """Replace [[file]] and [[diff]] markers with embedded content tags."""
+        if "[[file" not in content and "[[diff" not in content:
+            return content
+
+        ch = self.store.get_channel(channel_id)
+        cwd = os.path.expanduser(ch.working_directory) if ch and ch.working_directory else os.getcwd()
+
+        embed_count = 0
+
+        async def _replace_file(m: re.Match) -> str:
+            nonlocal embed_count
+            if embed_count >= self._MAX_EMBEDS:
+                return m.group(0)
+            embed_count += 1
+
+            start_line = int(m.group(1)) if m.group(1) else None
+            end_line = int(m.group(2)) if m.group(2) else None
+            rel_path = m.group(3).strip()
+
+            resolved = self._resolve_safe_path(cwd, rel_path)
+            if resolved is None or not os.path.isfile(resolved):
+                return f"[Could not read: {rel_path}]"
+
+            try:
+                with open(resolved, "r", errors="replace") as f:
+                    file_content = f.read(self._MAX_EMBED_SIZE + 1)
+            except OSError:
+                return f"[Could not read: {rel_path}]"
+
+            truncated = len(file_content) > self._MAX_EMBED_SIZE
+            if truncated:
+                file_content = file_content[: self._MAX_EMBED_SIZE]
+
+            if start_line is not None and end_line is not None:
+                lines = file_content.split("\n")
+                # Convert to 0-indexed, clamp to bounds.
+                s = max(0, start_line - 1)
+                e = min(len(lines), end_line)
+                file_content = "\n".join(lines[s:e])
+                line_attr = f' lines="{start_line}-{end_line}"'
+            else:
+                line_attr = ""
+
+            ext_match = os.path.splitext(rel_path)
+            lang = ext_match[1].lstrip(".").lower() if ext_match[1] else ""
+
+            return (
+                f'<build-file path="{rel_path}" lang="{lang}"{line_attr}>\n'
+                f"{file_content}\n"
+                f"</build-file>"
+            )
+
+        async def _replace_diff(m: re.Match) -> str:
+            nonlocal embed_count
+            if embed_count >= self._MAX_EMBEDS:
+                return m.group(0)
+            embed_count += 1
+
+            raw = m.group(1).strip()
+            if "|" in raw:
+                parts = raw.split("|", 1)
+                path1, path2 = parts[0].strip(), parts[1].strip()
+                resolved1 = self._resolve_safe_path(cwd, path1)
+                resolved2 = self._resolve_safe_path(cwd, path2)
+                if not resolved1 or not resolved2:
+                    return f"[Could not diff: {raw}]"
+                repo = find_git_repo(resolved1) or cwd
+                diff_out, _ = await _run_git(repo, ["diff", "--no-index", "--", resolved1, resolved2])
+                display_path = f"{path1} vs {path2}"
+            else:
+                rel_path = raw
+                resolved = self._resolve_safe_path(cwd, rel_path)
+                if not resolved:
+                    return f"[Could not diff: {rel_path}]"
+                repo = find_git_repo(resolved)
+                if not repo:
+                    return f"[Not in a git repo: {rel_path}]"
+                try:
+                    file_repo_rel = str(Path(resolved).resolve().relative_to(Path(repo).resolve()))
+                except ValueError:
+                    file_repo_rel = rel_path
+                diff_out, _ = await _run_git(repo, ["diff", "--", file_repo_rel])
+                if not diff_out:
+                    status_out, _ = await _run_git(repo, ["status", "--porcelain=v1", "--", file_repo_rel])
+                    if status_out.startswith("??"):
+                        diff_out, _ = await _run_git(repo, ["diff", "--no-index", "/dev/null", file_repo_rel])
+                if not diff_out:
+                    diff_out, _ = await _run_git(repo, ["diff", "--cached", "--", file_repo_rel])
+                display_path = rel_path
+
+            if not diff_out:
+                return f"[No diff: {display_path}]"
+
+            if len(diff_out) > self._MAX_EMBED_SIZE:
+                diff_out = diff_out[: self._MAX_EMBED_SIZE]
+
+            return (
+                f'<build-diff path="{display_path}">\n'
+                f"{diff_out}\n"
+                f"</build-diff>"
+            )
+
+        # Process file embeds.
+        parts = []
+        last_end = 0
+        for m in self._EMBED_FILE_RE.finditer(content):
+            parts.append(content[last_end:m.start()])
+            parts.append(await _replace_file(m))
+            last_end = m.end()
+        parts.append(content[last_end:])
+        content = "".join(parts)
+
+        # Process diff embeds.
+        parts = []
+        last_end = 0
+        for m in self._EMBED_DIFF_RE.finditer(content):
+            parts.append(content[last_end:m.start()])
+            parts.append(await _replace_diff(m))
+            last_end = m.end()
+        parts.append(content[last_end:])
+        return "".join(parts)
 
     async def _handle_activity_delta(
         self, agent: AgentConnection, data: dict[str, Any],

@@ -168,7 +168,14 @@ def make_chat_tools(wrapper: AgentWrapper) -> list:
     @tool(
         "send",
         "Send a message to the user. Use this to communicate with the user "
-        "instead of outputting text directly.",
+        "instead of outputting text directly.\n\n"
+        "You can embed file snippets and diffs in messages:\n"
+        "- [[file]](path/to/file) — embed entire file with syntax highlighting\n"
+        "- [[file 8:18]](path/to/file) — embed lines 8-18\n"
+        "- [[diff]](path/to/file) — embed git diff for file\n"
+        "- [[diff]](file1|file2) — diff two files\n"
+        "Paths are relative to your working directory. "
+        "Embeds render with syntax highlighting in the browser.",
         {
             "type": "object",
             "properties": {
