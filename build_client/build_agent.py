@@ -26,6 +26,7 @@ import logging
 import os
 import sys
 import uuid
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import (
@@ -191,8 +192,19 @@ def make_chat_tools(wrapper: AgentWrapper) -> list:
     )
     async def send(args):
         try:
+            # Resolve relative embed paths to absolute using the agent's cwd,
+            # since the agent may have cd'd away from the channel working dir.
+            import re as _re
+            _embed_path_re = _re.compile(r"(\[\[(?:file(?:\s+\d+:\d+)?|diff)\]\])\(([^)]+)\)")
+            def _abs_paths(m):
+                tag, raw = m.group(1), m.group(2)
+                if "|" in raw:
+                    parts = [str(Path(p.strip()).resolve()) for p in raw.split("|", 1)]
+                    return f"{tag}({parts[0]}|{parts[1]})"
+                return f"{tag}({Path(raw.strip()).resolve()})"
+            message = _embed_path_re.sub(_abs_paths, args["message"])
             result = await wrapper.chat_mcp.handle_send(
-                args["message"],
+                message,
                 suggested_actions=args.get("suggested_actions"),
             )
             return {"content": [{"type": "text", "text": json.dumps(result)}]}

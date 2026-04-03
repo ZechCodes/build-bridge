@@ -614,7 +614,9 @@ class AgentServer:
     _MAX_EMBEDS = 10
 
     def _resolve_safe_path(self, base_dir: str, relative_path: str) -> str | None:
-        """Resolve relative_path under base_dir. Returns None if it escapes."""
+        """Resolve relative_path under base_dir, or accept absolute paths."""
+        if os.path.isabs(relative_path):
+            return str(Path(relative_path).resolve())
         base = Path(base_dir).resolve()
         target = (base / relative_path).resolve()
         if target != base and not str(target).startswith(str(base) + os.sep):
