@@ -175,7 +175,8 @@ def make_chat_tools(wrapper: AgentWrapper) -> list:
         "- [[file 8:18]](path/to/file) — embed lines 8-18\n"
         "- [[diff]](path/to/file) — embed git diff for file\n"
         "- [[diff]](file1|file2) — diff two files\n"
-        "Paths are relative to your working directory. "
+        "Paths are resolved relative to the channel working directory (not your shell cwd). "
+        "Use absolute paths if you've cd'd elsewhere. "
         "Embeds render with syntax highlighting in the browser.",
         {
             "type": "object",
@@ -520,7 +521,15 @@ def make_pre_compact_hook(wrapper: AgentWrapper):
 
         # Inject chat instructions so they survive compaction.
         existing = input_data.get("custom_instructions") or ""
-        input_data["custom_instructions"] = existing + _CHAT_REMINDER
+        reminder = _CHAT_REMINDER
+        config = wrapper.config
+        if config and config.working_directory:
+            reminder += (
+                f"\n\nChannel working directory: {config.working_directory}\n"
+                "File paths in [[file]] and [[diff]] embeds are resolved relative to this directory. "
+                "Use absolute paths or paths relative to this directory, not your shell's cwd."
+            )
+        input_data["custom_instructions"] = existing + reminder
 
         return {}
 
@@ -730,6 +739,12 @@ async def run_agent(
 
     # Build chat_instructions into the system context.
     chat_context = CHAT_CONTEXT
+    if config.working_directory:
+        chat_context += (
+            f"Channel working directory: {config.working_directory}\n"
+            "File paths in [[file]] and [[diff]] embeds are resolved relative to this directory. "
+            "Use absolute paths or paths relative to this directory, not your shell's cwd.\n\n"
+        )
     if config.chat_instructions:
         chat_context += f"{config.chat_instructions}\n\n"
 

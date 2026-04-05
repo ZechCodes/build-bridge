@@ -479,6 +479,7 @@ class AgentServer:
                     "with the user. Use 'read_unread' to check for user messages and 'send' to "
                     "reply. Do not output user-facing text directly — always use the send tool."
                 ),
+                "working_directory": channel.working_directory or "",
                 "history": {
                     "chat": chat_history,
                     "activity": activity_history,

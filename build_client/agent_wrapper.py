@@ -86,6 +86,7 @@ class WrapperConfig:
     """Configuration received from agent.configured."""
 
     channel_id: str
+    working_directory: str
     system_prompt: str
     chat_instructions: str
     chat_history: list[dict[str, Any]]
@@ -220,6 +221,7 @@ class AgentWrapper:
         payload = data["payload"]
         self._config = WrapperConfig(
             channel_id=payload["channel_id"],
+            working_directory=payload.get("working_directory", ""),
             system_prompt=payload.get("system_prompt", ""),
             chat_instructions=payload.get("chat_instructions", ""),
             chat_history=payload.get("history", {}).get("chat", []),
