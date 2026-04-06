@@ -1874,6 +1874,9 @@ class E2EEHandler:
         url = payload.get("url", "")
         request_id = payload.get("request_id", "")
         tab_id = payload.get("tab_id", "")
+        method = (payload.get("method") or "GET").upper()
+        body = payload.get("body")
+        req_content_type = payload.get("content_type")
 
         if not url:
             return
@@ -1890,26 +1893,34 @@ class E2EEHandler:
 
         try:
             async with httpx.AsyncClient(follow_redirects=True, timeout=15, cookies=cookies) as client:
-                resp = await client.get(url)
+                if method == "POST":
+                    headers = {}
+                    if req_content_type:
+                        headers["content-type"] = req_content_type
+                    resp = await client.post(url, content=body, headers=headers)
+                else:
+                    resp = await client.get(url)
                 # Persist response cookies back to the tab jar
                 if tab_id and cookies is not None:
                     cookies.update(resp.cookies)
 
             content_type = resp.headers.get("content-type", "")
+            final_url = str(resp.url)
             is_text = any(t in content_type for t in (
                 "text/", "javascript", "json", "xml", "svg",
             ))
 
             if is_text:
-                body = resp.text[:self._MAX_URL_FETCH]
+                text_body = resp.text[:self._MAX_URL_FETCH]
                 truncated = len(resp.text) > self._MAX_URL_FETCH
                 await self._send_frame(session, ws, payload={
                     "action": "url_fetch_result",
                     "request_id": request_id,
                     "url": url,
+                    "final_url": final_url,
                     "status": resp.status_code,
                     "content_type": content_type,
-                    "content": body,
+                    "content": text_body,
                     "is_binary": False,
                     "truncated": truncated,
                 })
@@ -1920,6 +1931,7 @@ class E2EEHandler:
                     "action": "url_fetch_result",
                     "request_id": request_id,
                     "url": url,
+                    "final_url": final_url,
                     "status": resp.status_code,
                     "content_type": content_type,
                     "content": b64,

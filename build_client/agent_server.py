@@ -447,12 +447,15 @@ class AgentServer:
         self.store.update_plan_mode(channel.id, False)
 
         # Build history for agent.configured.
+        # Limit to recent entries to avoid exceeding the WebSocket frame limit.
+        all_chat = self.store.get_chat_history(channel.id, since=channel.session_start_at)
         chat_history = [
             {"role": m.role, "content": m.content}
-            for m in self.store.get_chat_history(channel.id, since=channel.session_start_at)
+            for m in all_chat[-50:]
         ]
+        all_activity = self.store.get_activity_history(channel.id, since=channel.session_start_at)
         activity_history = [
-            json.loads(e.data) for e in self.store.get_activity_history(channel.id, since=channel.session_start_at)
+            json.loads(e.data) for e in all_activity[-200:]
         ]
 
         # Register the connection.
