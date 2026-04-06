@@ -298,6 +298,8 @@ class E2EEHandler:
             await self._handle_file_read(session, payload, ws)
         elif action == "file_diff":
             await self._handle_file_diff(session, payload, ws)
+        elif action == "url_fetch":
+            await self._handle_url_fetch(session, payload, ws)
         else:
             log.warning("Unknown action: %s", action)
 
@@ -1857,6 +1859,70 @@ class E2EEHandler:
             "diff": diff_out,
             "truncated": truncated,
         })
+
+    # ---- URL Fetch (localhost proxy) ----
+
+    _MAX_URL_FETCH = 500_000  # 500KB max response body
+
+    async def _handle_url_fetch(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Fetch a URL (typically localhost) and return the response content."""
+        url = payload.get("url", "")
+        request_id = payload.get("request_id", "")
+
+        if not url:
+            return
+
+        import httpx
+        import base64
+
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+                resp = await client.get(url)
+
+            content_type = resp.headers.get("content-type", "")
+            is_text = any(t in content_type for t in (
+                "text/", "javascript", "json", "xml", "svg",
+            ))
+
+            if is_text:
+                body = resp.text[:self._MAX_URL_FETCH]
+                truncated = len(resp.text) > self._MAX_URL_FETCH
+                await self._send_frame(session, ws, payload={
+                    "action": "url_fetch_result",
+                    "request_id": request_id,
+                    "url": url,
+                    "status": resp.status_code,
+                    "content_type": content_type,
+                    "content": body,
+                    "is_binary": False,
+                    "truncated": truncated,
+                })
+            else:
+                raw = resp.content[:self._MAX_URL_FETCH]
+                b64 = base64.b64encode(raw).decode()
+                await self._send_frame(session, ws, payload={
+                    "action": "url_fetch_result",
+                    "request_id": request_id,
+                    "url": url,
+                    "status": resp.status_code,
+                    "content_type": content_type,
+                    "content": b64,
+                    "is_binary": True,
+                    "truncated": len(resp.content) > self._MAX_URL_FETCH,
+                })
+
+        except Exception as exc:
+            await self._send_frame(session, ws, payload={
+                "action": "url_fetch_result",
+                "request_id": request_id,
+                "url": url,
+                "error": str(exc),
+            })
 
     # ---- Terminal Execution ----
 
