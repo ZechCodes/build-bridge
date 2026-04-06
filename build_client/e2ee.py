@@ -1873,6 +1873,7 @@ class E2EEHandler:
         """Fetch a URL (typically localhost) and return the response content."""
         url = payload.get("url", "")
         request_id = payload.get("request_id", "")
+        tab_id = payload.get("tab_id", "")
 
         if not url:
             return
@@ -1880,9 +1881,19 @@ class E2EEHandler:
         import httpx
         import base64
 
+        # Per-tab cookie jar
+        if not hasattr(self, "_cookie_jars"):
+            self._cookie_jars: dict[str, Any] = {}
+        if tab_id and tab_id not in self._cookie_jars:
+            self._cookie_jars[tab_id] = httpx.Cookies()
+        cookies = self._cookie_jars.get(tab_id) if tab_id else None
+
         try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=15, cookies=cookies) as client:
                 resp = await client.get(url)
+                # Persist response cookies back to the tab jar
+                if tab_id and cookies is not None:
+                    cookies.update(resp.cookies)
 
             content_type = resp.headers.get("content-type", "")
             is_text = any(t in content_type for t in (
