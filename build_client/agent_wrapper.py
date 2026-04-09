@@ -546,6 +546,9 @@ class AgentWrapper:
         except ConnectionClosed:
             log.warning("Connection lost while sending %s", envelope.get("type"))
             self._connected.clear()
+        except Exception:
+            log.exception("Failed to send %s", envelope.get("type"))
+            self._connected.clear()
 
     async def _send_error(
         self,

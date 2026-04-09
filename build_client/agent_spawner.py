@@ -274,21 +274,50 @@ class AgentSpawner:
     # Monitor
     # -----------------------------------------------------------------
 
+    async def _drain_stream(self, stream, label: str, channel_id: str) -> bytes:
+        """Continuously drain a subprocess stream to prevent pipe buffer deadlock."""
+        chunks = []
+        try:
+            while True:
+                chunk = await stream.read(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.debug("Error draining %s for channel %s", label, channel_id[:8])
+        return b"".join(chunks)
+
     async def _monitor_worker(self, worker: WorkerInfo) -> None:
         """Monitor a worker process and log when it exits."""
         if not worker.process:
             return
 
         try:
+            # Start draining stdout/stderr immediately to prevent pipe buffer
+            # deadlock. If the agent writes more than the OS pipe buffer size
+            # (~64KB) without these being read, the process blocks on write.
+            drain_tasks = []
+            if worker.process.stdout:
+                drain_tasks.append(asyncio.create_task(
+                    self._drain_stream(worker.process.stdout, "stdout", worker.channel_id)
+                ))
+            if worker.process.stderr:
+                drain_tasks.append(asyncio.create_task(
+                    self._drain_stream(worker.process.stderr, "stderr", worker.channel_id)
+                ))
+
             returncode = await worker.process.wait()
 
-            # Read any stdout/stderr output.
+            # Collect drained output.
             stdout = b""
             stderr = b""
-            if worker.process.stdout:
-                stdout = await worker.process.stdout.read()
-            if worker.process.stderr:
-                stderr = await worker.process.stderr.read()
+            results = await asyncio.gather(*drain_tasks, return_exceptions=True)
+            if len(results) >= 1 and isinstance(results[0], bytes):
+                stdout = results[0]
+            if len(results) >= 2 and isinstance(results[1], bytes):
+                stderr = results[1]
 
             combined = (stdout + b"\n" + stderr).decode(errors="replace").strip()
 

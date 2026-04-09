@@ -468,12 +468,18 @@ def make_post_tool_hook(wrapper: AgentWrapper):
 
         content, is_error = _extract_tool_content(tool_response)
 
-        await wrapper.emit_tool_result(
-            tool_use_id or f"tu_{id(input_data)}",
-            content or "",
-            is_error=is_error,
-            tool_name=tool_name,
-        )
+        try:
+            await wrapper.emit_tool_result(
+                tool_use_id or f"tu_{id(input_data)}",
+                content or "",
+                is_error=is_error,
+                tool_name=tool_name,
+            )
+        except Exception:
+            log.exception(
+                "PostToolUse failed to emit result for %s (id=%s)",
+                tool_name, tool_use_id,
+            )
 
         # Inject unread message reminder via systemMessage so the agent
         # is aware of pending user messages during long tool chains.
