@@ -548,6 +548,22 @@ class CodexHarnessRuntime:
         message = error.get("message", str(error)) if isinstance(error, dict) else str(error)
         log.error("Codex app-server error: %s", message)
 
+        # Detect auth errors and surface them to the user.
+        auth_keywords = ("refresh token", "sign in again", "token_expired", "401 Unauthorized", "authentication")
+        msg_lower = message.lower()
+        if any(kw.lower() in msg_lower for kw in auth_keywords):
+            await self.wrapper._send_error(
+                code="auth_expired",
+                message="OpenAI authentication expired. Run `codex auth` in your terminal to sign in again.",
+                fatal=True,
+            )
+        else:
+            await self.wrapper._send_error(
+                code="codex_error",
+                message=message,
+                fatal=False,
+            )
+
     async def _on_command_approval(self, _request_id: str | int, params: dict[str, Any]) -> dict[str, Any]:
         log.info("Command approval params: %s", json.dumps(params, default=str)[:500])
         command = params.get("command") or ""
