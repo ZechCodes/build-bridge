@@ -32,7 +32,7 @@ def _sign_handshake(config: DeviceConfig) -> dict[str, str]:
     private_key = Ed25519PrivateKey.from_private_bytes(key_bytes)
 
     timestamp_str = str(time.time())
-    path = "/api/devices/ws"
+    path = "/ws/device"
     message = f"{timestamp_str}.GET.{path}".encode()
     signature = private_key.sign(message)
 
@@ -141,9 +141,9 @@ async def run_connection(
     # Ensure transport keypair exists.
     config = _ensure_transport_keypair(config)
 
-    # Build the WS URL from the HTTP base URL.
-    ws_base = config.base_url.replace("https://", "wss://").replace("http://", "ws://")
-    ws_url = f"{ws_base}/api/devices/ws"
+    # Build the WS URL from the relay URL (separate from base_url, which is the web API).
+    ws_base = config.relay_url.replace("https://", "wss://").replace("http://", "ws://").rstrip("/")
+    ws_url = f"{ws_base}/ws/device"
 
     backoff = INITIAL_BACKOFF_S
 

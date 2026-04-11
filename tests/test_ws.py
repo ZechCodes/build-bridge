@@ -50,7 +50,7 @@ class TestSignHandshake:
 
         # Reconstruct the signed message.
         timestamp_str = headers["X-Timestamp"]
-        path = "/api/devices/ws"
+        path = "/ws/device"
         message = f"{timestamp_str}.GET.{path}".encode()
 
         # Verify with the public key.
@@ -70,7 +70,7 @@ class TestSignHandshake:
         )
         signature = base64.b64decode(headers["X-Signature"])
         timestamp_str = headers["X-Timestamp"]
-        message = f"{timestamp_str}.GET./api/devices/ws".encode()
+        message = f"{timestamp_str}.GET./ws/device".encode()
 
         import pytest
         with pytest.raises(Exception):

@@ -26,6 +26,8 @@ class DeviceConfig:
     # X25519 transport keypair for E2EE (generated on first connect)
     transport_private_key_b64: str = ""
     transport_public_key_b64: str = ""
+    # Relay service for device WebSocket — separate from base_url (web API).
+    relay_url: str = "https://relay.getbuild.ing"
 
 
 def generate_keypair() -> dict:
