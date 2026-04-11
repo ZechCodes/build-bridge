@@ -160,6 +160,9 @@ class AgentServer:
         content: str | list[dict[str, Any]],
         msg_id: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        plan_mode: bool | None = None,
     ) -> bool:
         """Forward a user chat message to the agent on a channel.
 
@@ -183,6 +186,12 @@ class AgentServer:
         payload: dict[str, Any] = {"role": "user", "content": content}
         if attachments:
             payload["attachments"] = attachments
+        if model:
+            payload["model"] = model
+        if effort:
+            payload["effort"] = effort
+        if plan_mode is not None:
+            payload["plan_mode"] = plan_mode
 
         envelope = make_envelope(
             "chat.message",
@@ -968,6 +977,11 @@ class AgentServer:
         plan_mode = payload.get("plan_mode")
         if plan_mode is not None:
             self.store.update_plan_mode(agent.channel_id, plan_mode)
+
+        # Persist resume cursor for session resume on restart.
+        resume_cursor = payload.get("resume_cursor")
+        if resume_cursor is not None:
+            self.store.update_resume_cursor(agent.channel_id, resume_cursor)
 
         # Persist read status in E2EE message store.
         read_ids = payload.get("read_message_ids")

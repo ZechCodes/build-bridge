@@ -319,6 +319,7 @@ class E2EEHandler:
                     info = get_harness(agent_ch.harness)
                     entry["agent_name"] = info.name if info else "Device"
                     entry["working_directory"] = agent_ch.working_directory
+                    entry["effort"] = agent_ch.effort
                     entry["plan_mode"] = agent_ch.plan_mode
                     entry["last_seen_at"] = agent_ch.last_seen_at
             channel_list.append(entry)
@@ -373,13 +374,14 @@ class E2EEHandler:
         harness = payload.get("harness", "")
         if harness and self._agent_spawner:
             model = payload.get("model", "")
+            effort = payload.get("effort", "")
             system_prompt = payload.get("system_prompt", "")
             working_directory = payload.get("working_directory", "")
 
             log.info(
-                "create_channel payload: harness=%r, model=%r, "
+                "create_channel payload: harness=%r, model=%r, effort=%r, "
                 "system_prompt=%r, working_directory=%r, all_keys=%s",
-                harness, model, system_prompt, working_directory,
+                harness, model, effort, system_prompt, working_directory,
                 list(payload.keys()),
             )
 
@@ -392,6 +394,7 @@ class E2EEHandler:
                         channel_id=channel_id,
                         harness=harness,
                         model=model,
+                        effort=effort,
                         system_prompt=system_prompt,
                         working_directory=working_directory,
                     )
@@ -454,12 +457,24 @@ class E2EEHandler:
             self._agent_server.store.update_working_directory(channel_id, working_directory)
             log.info("Updated working_directory for channel %s", channel_id[:8])
 
+        model = payload.get("model")
+        if model and self._agent_server:
+            self._agent_server.store.update_model(channel_id, model)
+            log.info("Updated model for channel %s to %s", channel_id[:8], model)
+
+        effort = payload.get("effort")
+        if effort is not None and self._agent_server:
+            self._agent_server.store.update_effort(channel_id, effort)
+            log.info("Updated effort for channel %s to %s", channel_id[:8], effort)
+
         await self._send_frame(
             session, ws,
             payload={
                 "action": "channel_updated",
                 "channel_id": channel_id,
                 "working_directory": working_directory,
+                "model": model,
+                "effort": effort,
             },
         )
 
@@ -754,6 +769,8 @@ class E2EEHandler:
         channel_id = payload.get("channel_id", "")
         content = payload.get("content", "")
         plan_mode = payload.get("plan_mode")
+        model_override = payload.get("model")
+        effort_override = payload.get("effort")
         attachments = payload.get("attachments")  # list[{file_id, filename, size, mime_type}] or None
 
         if not channel_id or (not content and not attachments):
@@ -850,9 +867,18 @@ class E2EEHandler:
             if self._agent_server:
                 self._agent_server.store.update_plan_mode(channel_id, True)
 
+        # Persist model/effort changes to the store if provided.
+        if model_override and self._agent_server:
+            self._agent_server.store.update_model(channel_id, model_override)
+        if effort_override and self._agent_server:
+            self._agent_server.store.update_effort(channel_id, effort_override)
+
         sent = await self._agent_server.send_chat_message(
             channel_id, forwarded_content, msg_id=message_id,
             attachments=enriched_attachments,
+            model=model_override,
+            effort=effort_override,
+            plan_mode=plan_mode,
         )
         if sent:
             log.info("Forwarded chat message to agent on channel %s", channel_id[:8])

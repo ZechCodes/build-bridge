@@ -231,13 +231,17 @@ class CodexHarnessRuntime:
         model: str,
         initial_prompt: str | None,
         working_directory: str,
+        effort: str = "",
+        resume_thread_id: str | None = None,
     ) -> None:
         self.wrapper = wrapper
         self.client = client
         self.config = config
         self.model = model
+        self.effort = effort
         self.initial_prompt = initial_prompt
         self.working_directory = working_directory
+        self.resume_thread_id = resume_thread_id
         self.thread_id: str | None = None
         self.turn_id: str | None = None
         self.plan_mode = False
@@ -258,20 +262,47 @@ class CodexHarnessRuntime:
         await self.client.initialize(client_name="build-client", client_version="0.1.0")
         log.info("Codex app-server initialized")
 
-        log.info("Starting Codex thread...")
-        thread = await self.client.send_request("thread/start", {
-            "cwd": self.working_directory,
-            "model": self.model,
-            "approvalPolicy": "on-request",
-            "approvalsReviewer": "user",
-            "sandbox": "workspace-write",
-            "baseInstructions": self.config.system_prompt or None,
-            "developerInstructions": self._developer_instructions(),
-            "ephemeral": True,
-            "experimentalRawEvents": False,
-            "persistExtendedHistory": False,
-        })
-        self.thread_id = thread["thread"]["id"]
+        # Try to resume existing thread or start a new one.
+        if self.resume_thread_id:
+            try:
+                log.info("Resuming Codex thread %s...", self.resume_thread_id[:8])
+                await self.client.send_request("thread/resume", {
+                    "threadId": self.resume_thread_id,
+                    "cwd": self.working_directory,
+                    "model": self.model,
+                })
+                self.thread_id = self.resume_thread_id
+                log.info("Resumed Codex thread %s", self.thread_id[:8])
+            except Exception as exc:
+                log.warning("Thread resume failed, starting fresh: %s", exc)
+                self.resume_thread_id = None
+                await self.wrapper.emit_system_message("Context cleared — could not resume previous session.")
+                self.thread_id = None
+
+        if not self.thread_id:
+            log.info("Starting new Codex thread...")
+            thread_params: dict[str, Any] = {
+                "cwd": self.working_directory,
+                "model": self.model,
+                "approvalPolicy": "on-request",
+                "approvalsReviewer": "user",
+                "sandbox": "workspace-write",
+                "baseInstructions": self.config.system_prompt or None,
+                "developerInstructions": self._developer_instructions(),
+                "ephemeral": False,
+                "experimentalRawEvents": False,
+                "persistExtendedHistory": True,
+            }
+            if self.effort:
+                thread_params["effort"] = self.effort
+            thread = await self.client.send_request("thread/start", thread_params)
+            self.thread_id = thread["thread"]["id"]
+
+        # Persist thread_id as resume cursor.
+        try:
+            await self.wrapper.emit_resume_cursor(self.thread_id)
+        except Exception:
+            log.debug("Failed to persist resume cursor", exc_info=True)
 
         initial = self._initial_turn_text()
         if initial:
@@ -372,7 +403,22 @@ class CodexHarnessRuntime:
         if not self.thread_id:
             return
 
-        params = {
+        # Apply pending per-turn settings from the wrapper.
+        if self.wrapper.pending_model:
+            self.model = self.wrapper.pending_model
+            self.wrapper.pending_model = None
+            log.info("Model switched to %s", self.model)
+        if self.wrapper.pending_effort:
+            self.effort = self.wrapper.pending_effort
+            self.wrapper.pending_effort = None
+            log.info("Effort changed to %s", self.effort)
+        if self.wrapper.pending_plan_mode is not None:
+            self.plan_mode = self.wrapper.pending_plan_mode
+            self.wrapper.pending_plan_mode = None
+            await self.wrapper.emit_state_update(plan_mode=self.plan_mode)
+            log.info("Plan mode set to %s", self.plan_mode)
+
+        params: dict[str, Any] = {
             "threadId": self.thread_id,
             "input": _codex_input(text),
             "cwd": self.working_directory,
@@ -388,6 +434,10 @@ class CodexHarnessRuntime:
             },
             "model": self.model,
         }
+        if self.effort:
+            params["effort"] = self.effort
+        if self.plan_mode:
+            params["collaborationMode"] = {"mode": "plan"}
 
         self._last_activity = time.monotonic()
         if self.turn_id:
@@ -685,6 +735,8 @@ async def run_agent(
     initial_prompt: str | None = None,
     agent_id: str | None = None,
     working_directory: str | None = None,
+    effort: str = "",
+    resume_session: str | None = None,
 ) -> None:
     workdir = working_directory or os.getcwd()
     if os.path.isdir(workdir):
@@ -745,6 +797,8 @@ async def run_agent(
             model=model,
             initial_prompt=initial_prompt,
             working_directory=workdir,
+            effort=effort,
+            resume_thread_id=resume_session,
         )
 
         log.info("Starting Codex runtime...")
@@ -798,6 +852,9 @@ def main() -> None:
     parser.add_argument("--model", default=os.environ.get("BUILD_AGENT_MODEL", "gpt-5.4"))
     parser.add_argument("--agent-id", default=os.environ.get("BUILD_AGENT_ID"))
     parser.add_argument("--working-directory", default=os.environ.get("BUILD_WORKING_DIR"))
+    parser.add_argument("--effort", default=os.environ.get("BUILD_AGENT_EFFORT", ""))
+    parser.add_argument("--resume-session", default=None,
+                        help="Thread ID to resume from a previous session")
     args = parser.parse_args()
 
     initial_prompt = " ".join(args.prompt) if args.prompt else None
@@ -808,6 +865,8 @@ def main() -> None:
         initial_prompt=initial_prompt,
         agent_id=args.agent_id,
         working_directory=args.working_directory,
+        effort=args.effort or "",
+        resume_session=args.resume_session,
     ))
 
 

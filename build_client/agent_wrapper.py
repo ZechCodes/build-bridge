@@ -144,6 +144,11 @@ class AgentWrapper:
         # Pending interactions — interaction_id -> (Event, result_dict).
         self._pending_interactions: dict[str, tuple[asyncio.Event, dict[str, Any]]] = {}
 
+        # Pending per-turn settings from chat.message payloads.
+        self.pending_model: str | None = None
+        self.pending_effort: str | None = None
+        self.pending_plan_mode: bool | None = None
+
     # -----------------------------------------------------------------
     # Properties
     # -----------------------------------------------------------------
@@ -298,6 +303,17 @@ class AgentWrapper:
 
         if msg_type == CHAT_MESSAGE:
             content = payload.get("content", "")
+
+            # Extract per-turn settings if present.
+            model = payload.get("model")
+            if model:
+                self.pending_model = model
+            effort = payload.get("effort")
+            if effort:
+                self.pending_effort = effort
+            plan_mode = payload.get("plan_mode")
+            if plan_mode is not None:
+                self.pending_plan_mode = plan_mode
 
             # Cancel pending interactions so the agent processes the new message.
             if self._pending_interactions:
@@ -460,6 +476,13 @@ class AgentWrapper:
         """Emit agent.state_update — report harness state to browser."""
         envelope = make_envelope(AGENT_STATE_UPDATE, {
             "plan_mode": plan_mode,
+        })
+        await self._send(envelope)
+
+    async def emit_resume_cursor(self, cursor: str) -> None:
+        """Emit agent.state_update with resume_cursor for persistence."""
+        envelope = make_envelope(AGENT_STATE_UPDATE, {
+            "resume_cursor": cursor,
         })
         await self._send(envelope)
 

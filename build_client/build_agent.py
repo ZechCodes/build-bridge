@@ -36,6 +36,7 @@ from claude_agent_sdk import (
     HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
+    ResultMessage,
     TextBlock,
     ToolPermissionContext,
     ToolUseBlock,
@@ -629,6 +630,8 @@ def make_can_use_tool(wrapper: AgentWrapper):
 def build_agent_options(
     wrapper: AgentWrapper,
     system_prompt_append: str = "",
+    effort: str | None = None,
+    resume: str | None = None,
 ) -> ClaudeAgentOptions:
     """Build ClaudeAgentOptions with BAP hooks and Chat MCP tools.
 
@@ -646,7 +649,7 @@ def build_agent_options(
         else None
     )
 
-    return ClaudeAgentOptions(
+    options = ClaudeAgentOptions(
         setting_sources=["project"],
         permission_mode="default",
         can_use_tool=make_can_use_tool(wrapper),
@@ -660,6 +663,11 @@ def build_agent_options(
         stderr=_stderr_logger,
         system_prompt=system_prompt,
     )
+    if effort:
+        options.effort = effort  # type: ignore[assignment]
+    if resume:
+        options.resume = resume
+    return options
 
 
 # ---------------------------------------------------------------------------
@@ -705,6 +713,8 @@ async def run_agent(
     initial_prompt: str | None = None,
     agent_id: str | None = None,
     working_directory: str | None = None,
+    effort: str | None = None,
+    resume_session: str | None = None,
 ) -> None:
     """Main agent loop — connects to device client and runs Claude Code."""
 
@@ -814,6 +824,27 @@ async def run_agent(
             return ""
         return "\n\n".join(sections) + "\n\n"
 
+    # Session state — persisted across outer loop iterations.
+    last_session_id: str | None = resume_session
+    current_effort: str | None = effort
+
+    async def _process_response(client_ref: ClaudeSDKClient) -> str | None:
+        """Process response messages and capture session_id from ResultMessage."""
+        nonlocal last_session_id
+        session_id = None
+        async for message in client_ref.receive_response():
+            await handle_response_message(message, wrapper)
+            if isinstance(message, ResultMessage):
+                session_id = message.session_id
+        if session_id:
+            last_session_id = session_id
+            # Persist to DB so the spawner can pass it on restart.
+            try:
+                await wrapper.emit_resume_cursor(session_id)
+            except Exception:
+                log.debug("Failed to persist resume cursor", exc_info=True)
+        return session_id
+
     try:
         # Outer loop: each iteration is a fresh agent context.
         while True:
@@ -825,62 +856,89 @@ async def run_agent(
             if history_ctx:
                 system_append += history_ctx
 
-            options = build_agent_options(wrapper, system_prompt_append=system_append)
+            options = build_agent_options(
+                wrapper,
+                system_prompt_append=system_append,
+                effort=current_effort,
+                resume=last_session_id,
+            )
 
-            async with ClaudeSDKClient(options=options) as client:
-                active_client[0] = client
-                # Build initial prompt (chat context / history now live in
-                # the system prompt, so the user message is just the trigger).
-                if next_prompt:
-                    prompt = next_prompt
-                else:
-                    # Yield to the event loop so forwarded messages from
-                    # the server have a chance to be queued by wrapper.run().
-                    await asyncio.sleep(0)
-                    # Check for any queued messages from before we connected.
-                    if wrapper.chat_mcp.has_unread:
-                        notification = wrapper.chat_mcp.build_unread_notification()
-                        prompt = notification or "Check in with the user."
+            try:
+                async with ClaudeSDKClient(options=options) as client:
+                    active_client[0] = client
+                    # Build initial prompt (chat context / history now live in
+                    # the system prompt, so the user message is just the trigger).
+                    if next_prompt:
+                        prompt = next_prompt
                     else:
-                        # No messages — just notify browser and wait.
-                        await wrapper.emit_system_message("Agent is ready.")
-                        prompt = None
-                next_prompt = None
+                        # Yield to the event loop so forwarded messages from
+                        # the server have a chance to be queued by wrapper.run().
+                        await asyncio.sleep(0)
+                        # Check for any queued messages from before we connected.
+                        if wrapper.chat_mcp.has_unread:
+                            notification = wrapper.chat_mcp.build_unread_notification()
+                            prompt = notification or "Check in with the user."
+                        else:
+                            # No messages — just notify browser and wait.
+                            await wrapper.emit_system_message("Agent is ready.")
+                            prompt = None
+                    next_prompt = None
 
-                # Initial query (skip if no prompt — agent is idle).
-                if prompt:
-                    log.info("Sending initial prompt to agent")
-                    await client.query(prompt)
-                    async for message in client.receive_response():
-                        await handle_response_message(message, wrapper)
+                    # Initial query (skip if no prompt — agent is idle).
+                    if prompt:
+                        log.info("Sending initial prompt to agent")
+                        await client.query(prompt)
+                        await _process_response(client)
 
-                # Message loop — wait for user messages and inject them.
-                exit_reason = "context_ended"
-                while True:
-                    # Wait for a new user message (queued by wrapper.run() from chat.message).
-                    has_msg = await wrapper.chat_mcp.wait_for_unread(timeout=5.0)
+                    # Message loop — wait for user messages and inject them.
+                    exit_reason = "context_ended"
+                    while True:
+                        # Wait for a new user message (queued by wrapper.run() from chat.message).
+                        has_msg = await wrapper.chat_mcp.wait_for_unread(timeout=5.0)
 
-                    if cancel_event.is_set():
-                        cancel_event.clear()
-                        exit_reason = "cancelled"
-                        log.info("Cancel received, breaking inner loop")
-                        break
+                        if cancel_event.is_set():
+                            cancel_event.clear()
+                            exit_reason = "cancelled"
+                            log.info("Cancel received, breaking inner loop")
+                            break
 
-                    if not wrapper.is_connected:
-                        exit_reason = "disconnected"
-                        log.warning("Lost connection to device client")
-                        break
+                        if not wrapper.is_connected:
+                            exit_reason = "disconnected"
+                            log.warning("Lost connection to device client")
+                            break
 
-                    if not has_msg:
-                        continue
+                        # Check for effort change — requires client recreation.
+                        if wrapper.pending_effort and wrapper.pending_effort != current_effort:
+                            current_effort = wrapper.pending_effort
+                            wrapper.pending_effort = None
+                            exit_reason = "settings_changed"
+                            log.info("Effort changed to %s, will recreate client with resume", current_effort)
+                            break
 
-                    # Atomically check and build notification to avoid race
-                    # with concurrent handle_read_unread draining the queue.
-                    notification = await wrapper.chat_mcp.drain_unread_notification()
-                    if notification:
-                        await client.query(notification)
-                        async for message in client.receive_response():
-                            await handle_response_message(message, wrapper)
+                        if not has_msg:
+                            continue
+
+                        # Apply model change before the turn (no restart needed).
+                        if wrapper.pending_model:
+                            log.info("Switching model to %s", wrapper.pending_model)
+                            await client.set_model(wrapper.pending_model)
+                            wrapper.pending_model = None
+
+                        # Atomically check and build notification to avoid race
+                        # with concurrent handle_read_unread draining the queue.
+                        notification = await wrapper.chat_mcp.drain_unread_notification()
+                        if notification:
+                            await client.query(notification)
+                            await _process_response(client)
+
+            except Exception as client_err:
+                # If resume failed, retry without resume.
+                if last_session_id and ("resume" in str(client_err).lower() or "session" in str(client_err).lower()):
+                    log.warning("Session resume failed, starting fresh: %s", client_err)
+                    last_session_id = None
+                    await wrapper.emit_system_message("Context cleared — could not resume previous session.")
+                    continue
+                raise
 
             active_client[0] = None
             # Client exited — log and decide whether to loop.
@@ -928,6 +986,10 @@ def main() -> None:
                         help="Agent ID (for reconnection)")
     parser.add_argument("--working-directory", default=os.environ.get("BUILD_WORKING_DIR"),
                         help="Working directory for the agent")
+    parser.add_argument("--effort", default=os.environ.get("BUILD_AGENT_EFFORT"),
+                        help="Thinking effort level (low, medium, high, max)")
+    parser.add_argument("--resume-session", default=None,
+                        help="Session ID to resume from a previous session")
     args = parser.parse_args()
 
     initial_prompt = " ".join(args.prompt) if args.prompt else None
@@ -939,6 +1001,8 @@ def main() -> None:
         initial_prompt=initial_prompt,
         agent_id=args.agent_id,
         working_directory=args.working_directory,
+        effort=args.effort,
+        resume_session=args.resume_session,
     ))
 
 

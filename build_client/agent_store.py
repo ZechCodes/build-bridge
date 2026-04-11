@@ -38,6 +38,8 @@ class AgentChannel:
     plan_mode: bool = False
     session_start_at: str | None = None
     last_seen_at: str | None = None
+    effort: str = ""
+    resume_cursor: str = ""  # JSON: session_id (Claude) or thread_id (Codex)
 
 
 @dataclass
@@ -159,6 +161,8 @@ class AgentStore:
             "ALTER TABLE agent_channels ADD COLUMN last_seen_at TEXT",
             "ALTER TABLE complications ADD COLUMN changed_at REAL",
             "ALTER TABLE chat_messages ADD COLUMN suggested_actions TEXT",
+            "ALTER TABLE agent_channels ADD COLUMN effort TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE agent_channels ADD COLUMN resume_cursor TEXT NOT NULL DEFAULT ''",
         ):
             try:
                 self.db.execute(stmt)
@@ -436,6 +440,8 @@ class AgentStore:
             plan_mode=bool(row["plan_mode"]) if "plan_mode" in keys else False,
             session_start_at=row["session_start_at"] if "session_start_at" in keys else None,
             last_seen_at=row["last_seen_at"] if "last_seen_at" in keys else None,
+            effort=row["effort"] if "effort" in keys else "",
+            resume_cursor=row["resume_cursor"] if "resume_cursor" in keys else "",
         )
 
     # ----- Interactions -----
@@ -520,14 +526,38 @@ class AgentStore:
         self.db.commit()
 
     def reset_session(self, channel_id: str) -> str:
-        """Mark a new session boundary. Returns the timestamp."""
+        """Mark a new session boundary and clear resume cursor. Returns the timestamp."""
         now = now_iso()
         self.db.execute(
-            "UPDATE agent_channels SET session_start_at = ?, updated_at = ? WHERE id = ?",
+            "UPDATE agent_channels SET session_start_at = ?, resume_cursor = '', updated_at = ? WHERE id = ?",
             (now, now, channel_id),
         )
         self.db.commit()
         return now
+
+    def update_resume_cursor(self, channel_id: str, cursor: str) -> None:
+        """Store the provider session resume cursor (session_id or thread_id)."""
+        self.db.execute(
+            "UPDATE agent_channels SET resume_cursor = ?, updated_at = ? WHERE id = ?",
+            (cursor, now_iso(), channel_id),
+        )
+        self.db.commit()
+
+    def update_effort(self, channel_id: str, effort: str) -> None:
+        """Update a channel's effort level."""
+        self.db.execute(
+            "UPDATE agent_channels SET effort = ?, updated_at = ? WHERE id = ?",
+            (effort, now_iso(), channel_id),
+        )
+        self.db.commit()
+
+    def update_model(self, channel_id: str, model: str) -> None:
+        """Update a channel's model."""
+        self.db.execute(
+            "UPDATE agent_channels SET model = ?, updated_at = ? WHERE id = ?",
+            (model, now_iso(), channel_id),
+        )
+        self.db.commit()
 
     def mark_channel_seen(self, channel_id: str) -> str:
         """Mark a channel as seen by the user. Returns the timestamp."""

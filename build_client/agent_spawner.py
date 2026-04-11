@@ -45,6 +45,7 @@ class WorkerInfo:
     model: str
     system_prompt: str
     working_directory: str
+    effort: str = ""
     pid: int | None = None
     process: asyncio.subprocess.Process | None = None
 
@@ -90,6 +91,7 @@ class AgentSpawner:
         model: str,
         system_prompt: str = "",
         working_directory: str = "",
+        effort: str = "",
     ) -> WorkerInfo:
         """Spawn a build-agent process for a channel.
 
@@ -136,6 +138,17 @@ class AgentSpawner:
             resolved_wd = os.path.expanduser(os.path.expandvars(working_directory))
             cmd.extend(["--working-directory", resolved_wd])
 
+        # Read effort from DB if not passed directly (user may have changed it via edit modal).
+        channel = existing or self._store.get_channel(channel_id)
+        effective_effort = effort or (channel.effort if channel else "")
+        if effective_effort:
+            cmd.extend(["--effort", effective_effort])
+
+        # Pass resume cursor if available (not cleared by reset).
+        resume_cursor = channel.resume_cursor if channel else ""
+        if resume_cursor:
+            cmd.extend(["--resume-session", resume_cursor])
+
         # Set up environment.
         env = os.environ.copy()
         env["BUILD_AGENT_PORT"] = str(self._agent_port)
@@ -178,6 +191,7 @@ class AgentSpawner:
             model=model,
             system_prompt=system_prompt,
             working_directory=working_directory,
+            effort=effective_effort,
             pid=process.pid,
             process=process,
         )
