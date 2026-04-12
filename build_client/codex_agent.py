@@ -203,8 +203,14 @@ def create_isolated_codex_home(
     bridge_socket: str,
     bridge_token: str,
     trusted_project: str | None = None,
+    channel_id: str | None = None,
 ) -> Path:
-    runtime_home = Path(tempfile.mkdtemp(prefix="build-codex-home-"))
+    # Use a persistent directory keyed by channel ID so Codex rollout files
+    # and session state survive agent restarts, enabling thread/resume.
+    if channel_id:
+        runtime_home = Path.home() / ".config" / "build" / "codex-homes" / channel_id
+    else:
+        runtime_home = Path(tempfile.mkdtemp(prefix="build-codex-home-"))
     codex_dir = runtime_home / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
 
@@ -782,6 +788,7 @@ async def run_agent(
             bridge_socket=bridge.socket_path,
             bridge_token=bridge_token,
             trusted_project=workdir,
+            channel_id=wrapper.channel_id,
         )
 
         env = os.environ.copy()
@@ -836,7 +843,9 @@ async def run_agent(
                     await bridge.stop()
         except TimeoutError:
             log.warning("Cleanup timed out after 10s")
-        if runtime_home:
+        # Only clean up temp homes (no channel_id); persistent homes are kept
+        # so Codex rollout files survive restarts for thread/resume.
+        if runtime_home and str(runtime_home).startswith(tempfile.gettempdir()):
             shutil.rmtree(runtime_home, ignore_errors=True)
         if bridge_dir:
             shutil.rmtree(bridge_dir, ignore_errors=True)
