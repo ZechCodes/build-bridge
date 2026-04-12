@@ -946,6 +946,10 @@ async def run_agent(
             # Client exited — log and decide whether to loop.
             log.info("Agent context ended (%s)", exit_reason)
 
+            # Emit activity.end so the device knows the cancel was acknowledged.
+            if exit_reason == "cancelled":
+                await wrapper.emit_activity_end("cancelled")
+
             if not wrapper.is_connected:
                 break
 

@@ -334,8 +334,10 @@ class AgentWrapper:
                 self.cancel_all_interactions()
             if self._on_cancel:
                 await self._on_cancel()
-            # Emit activity.end with cancelled reason.
-            await self.emit_activity_end("cancelled")
+            # NOTE: Do NOT emit activity.end here — the harness is responsible
+            # for emitting it when work actually stops. Emitting it prematurely
+            # would trick the device into thinking the cancel succeeded while
+            # the agent is still running a tool.
 
         elif msg_type == INTERACTION_RESPONSE:
             interaction_id = payload.get("interaction_id", "")
