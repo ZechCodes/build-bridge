@@ -830,10 +830,17 @@ async def run_agent(
     current_model: str = model
 
     async def _process_response(client_ref: ClaudeSDKClient) -> str | None:
-        """Process response messages and capture session_id from ResultMessage."""
+        """Process response messages and capture session_id from ResultMessage.
+
+        Checks cancel_event between each message so cancellation takes effect
+        between tool calls within a turn, not just between turns.
+        """
         nonlocal last_session_id
         session_id = None
         async for message in client_ref.receive_response():
+            if cancel_event.is_set():
+                log.info("Cancel detected mid-turn, stopping response processing")
+                break
             await handle_response_message(message, wrapper)
             if isinstance(message, ResultMessage):
                 session_id = message.session_id
