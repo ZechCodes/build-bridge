@@ -892,23 +892,69 @@ async def run_agent(
                             prompt = None
                     next_prompt = None
 
+                    async def _run_query_cancellable(client_ref: ClaudeSDKClient) -> bool:
+                        """Run _process_response, cancelling it if cancel_event fires.
+
+                        Returns True if the query was cancelled, False if it completed.
+                        """
+                        process_task = asyncio.create_task(_process_response(client_ref))
+                        cancel_waiter = asyncio.create_task(cancel_event.wait())
+
+                        done, _ = await asyncio.wait(
+                            {process_task, cancel_waiter},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+
+                        if cancel_waiter in done:
+                            # Cancel arrived — abort the response processing.
+                            process_task.cancel()
+                            try:
+                                await process_task
+                            except asyncio.CancelledError:
+                                pass
+                            cancel_event.clear()
+                            return True
+                        else:
+                            cancel_waiter.cancel()
+                            # Propagate any exception from the process task.
+                            process_task.result()
+                            return False
+
                     # Initial query (skip if no prompt — agent is idle).
+                    exit_reason = "context_ended"
                     if prompt:
                         log.info("Sending initial prompt to agent")
                         await client.query(prompt)
-                        await _process_response(client)
+                        if await _run_query_cancellable(client):
+                            exit_reason = "cancelled"
+                            log.info("Cancel during initial query")
 
                     # Message loop — wait for user messages and inject them.
-                    exit_reason = "context_ended"
-                    while True:
-                        # Wait for a new user message (queued by wrapper.run() from chat.message).
-                        has_msg = await wrapper.chat_mcp.wait_for_unread(timeout=5.0)
+                    while exit_reason != "cancelled":
+                        # Race message wait against cancel event.
+                        msg_task = asyncio.create_task(
+                            wrapper.chat_mcp.wait_for_unread(timeout=5.0)
+                        )
+                        cancel_waiter = asyncio.create_task(cancel_event.wait())
 
-                        if cancel_event.is_set():
+                        done, _ = await asyncio.wait(
+                            {msg_task, cancel_waiter},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+
+                        if cancel_waiter in done:
+                            msg_task.cancel()
+                            try:
+                                await msg_task
+                            except asyncio.CancelledError:
+                                pass
                             cancel_event.clear()
                             exit_reason = "cancelled"
                             log.info("Cancel received, breaking inner loop")
                             break
+                        else:
+                            cancel_waiter.cancel()
+                            has_msg = msg_task.result()
 
                         if not wrapper.is_connected:
                             exit_reason = "disconnected"
@@ -938,7 +984,10 @@ async def run_agent(
                         notification = await wrapper.chat_mcp.drain_unread_notification()
                         if notification:
                             await client.query(notification)
-                            await _process_response(client)
+                            if await _run_query_cancellable(client):
+                                exit_reason = "cancelled"
+                                log.info("Cancel during query")
+                                break
 
             except Exception as client_err:
                 # If resume failed, retry without resume.
