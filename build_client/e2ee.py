@@ -478,6 +478,17 @@ class E2EEHandler:
             },
         )
 
+        # Emit setting-change markers so the browser shows what changed.
+        changes: list[str] = []
+        if model:
+            changes.append(f"Model → {model}")
+        if effort is not None:
+            changes.append(f"Effort → {effort or 'default'}")
+        if changes:
+            await self._send_system_message(
+                session, ws, channel_id, " · ".join(changes),
+            )
+
     async def _delete_channel(
         self,
         session: ActiveSession,

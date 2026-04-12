@@ -827,6 +827,7 @@ async def run_agent(
     # Session state — persisted across outer loop iterations.
     last_session_id: str | None = resume_session
     current_effort: str | None = effort
+    current_model: str = model
 
     async def _process_response(client_ref: ClaudeSDKClient) -> str | None:
         """Process response messages and capture session_id from ResultMessage."""
@@ -919,10 +920,11 @@ async def run_agent(
                             continue
 
                         # Apply model change before the turn (no restart needed).
-                        if wrapper.pending_model:
-                            log.info("Switching model to %s", wrapper.pending_model)
-                            await client.set_model(wrapper.pending_model)
-                            wrapper.pending_model = None
+                        if wrapper.pending_model and wrapper.pending_model != current_model:
+                            current_model = wrapper.pending_model
+                            log.info("Switching model to %s", current_model)
+                            await client.set_model(current_model)
+                        wrapper.pending_model = None
 
                         # Atomically check and build notification to avoid race
                         # with concurrent handle_read_unread draining the queue.

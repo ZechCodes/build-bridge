@@ -404,19 +404,19 @@ class CodexHarnessRuntime:
             return
 
         # Apply pending per-turn settings from the wrapper.
-        if self.wrapper.pending_model:
+        if self.wrapper.pending_model and self.wrapper.pending_model != self.model:
             self.model = self.wrapper.pending_model
-            self.wrapper.pending_model = None
             log.info("Model switched to %s", self.model)
-        if self.wrapper.pending_effort:
+        self.wrapper.pending_model = None
+        if self.wrapper.pending_effort and self.wrapper.pending_effort != self.effort:
             self.effort = self.wrapper.pending_effort
-            self.wrapper.pending_effort = None
             log.info("Effort changed to %s", self.effort)
-        if self.wrapper.pending_plan_mode is not None:
+        self.wrapper.pending_effort = None
+        if self.wrapper.pending_plan_mode is not None and self.wrapper.pending_plan_mode != self.plan_mode:
             self.plan_mode = self.wrapper.pending_plan_mode
-            self.wrapper.pending_plan_mode = None
             await self.wrapper.emit_state_update(plan_mode=self.plan_mode)
             log.info("Plan mode set to %s", self.plan_mode)
+        self.wrapper.pending_plan_mode = None
 
         params: dict[str, Any] = {
             "threadId": self.thread_id,
