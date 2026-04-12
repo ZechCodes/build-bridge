@@ -327,6 +327,11 @@ class AgentWrapper:
 
         elif msg_type == CHAT_CANCEL:
             log.info("Received chat.cancel")
+            # Cancel pending interactions so the agent isn't blocked waiting
+            # for an approval or question response.
+            if self._pending_interactions:
+                log.info("Cancelling %d pending interaction(s) on cancel", len(self._pending_interactions))
+                self.cancel_all_interactions()
             if self._on_cancel:
                 await self._on_cancel()
             # Emit activity.end with cancelled reason.

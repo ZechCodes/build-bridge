@@ -1080,7 +1080,9 @@ class E2EEHandler:
             )
             return
 
-        stopped = await self._agent_spawner.stop(channel_id)
+        # Use resumable=True so the channel stays idle and a new agent can
+        # be spawned when the user sends the next message.
+        stopped = await self._agent_spawner.stop(channel_id, resumable=True)
         await self._send_frame(
             session, ws,
             payload={

@@ -322,8 +322,30 @@ class CodexHarnessRuntime:
                 if self._cancel_event.is_set():
                     await self._interrupt_turn()
                     self._cancel_event.clear()
+                    continue
 
-                notification = await self._next_notification_text(timeout=1.0)
+                # Race notification wait against cancel event so cancel is
+                # processed immediately rather than after the timeout expires.
+                notification_task = asyncio.create_task(
+                    self._next_notification_text(timeout=1.0)
+                )
+                cancel_wait = asyncio.create_task(self._cancel_event.wait())
+                done, _ = await asyncio.wait(
+                    {notification_task, cancel_wait},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if cancel_wait in done:
+                    notification_task.cancel()
+                    try:
+                        await notification_task
+                    except asyncio.CancelledError:
+                        pass
+                    continue  # Loop back to process cancel at top.
+                else:
+                    cancel_wait.cancel()
+
+                notification = notification_task.result()
                 if not notification:
                     continue
                 await self._start_or_steer(notification)
@@ -749,10 +771,14 @@ async def run_agent(
         os.chdir(workdir)
         log.info("Working directory: %s", workdir)
 
-    cancel_event = asyncio.Event()
+    # Runtime reference — set once created, used by on_cancel for immediate
+    # interrupt without polling.
+    _runtime_ref: list[CodexHarnessRuntime | None] = [None]
 
     async def on_cancel() -> None:
-        cancel_event.set()
+        rt = _runtime_ref[0]
+        if rt:
+            rt.cancel()
 
     wrapper = AgentWrapper(
         port=port,
@@ -807,15 +833,10 @@ async def run_agent(
             effort=effort,
             resume_thread_id=resume_session,
         )
+        _runtime_ref[0] = runtime
 
         log.info("Starting Codex runtime...")
         run_task = asyncio.create_task(runtime.run())
-        while not run_task.done():
-            if cancel_event.is_set() and runtime:
-                runtime.cancel()
-                cancel_event.clear()
-            await asyncio.sleep(0.5)
-        log.info("Codex runtime exited, collecting result...")
         await run_task
         log.info("Codex runtime completed")
 
