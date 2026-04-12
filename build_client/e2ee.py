@@ -1064,7 +1064,11 @@ class E2EEHandler:
         payload: dict[str, Any],
         ws: Any,
     ) -> None:
-        """Stop the agent on a channel."""
+        """Stop the agent on a channel with two-phase approach.
+
+        Phase 1: Send graceful chat.cancel to the agent.
+        Phase 2: If the agent doesn't exit within 3s, kill the process.
+        """
         if not self._agent_spawner:
             await self._send_frame(
                 session, ws,
@@ -1080,15 +1084,32 @@ class E2EEHandler:
             )
             return
 
-        # Use resumable=True so the channel stays idle and a new agent can
-        # be spawned when the user sends the next message.
-        stopped = await self._agent_spawner.stop(channel_id, resumable=True)
+        was_running = self._agent_spawner.is_running(channel_id)
+
+        if was_running:
+            # Phase 1: graceful cancel.
+            sent = await self.agent_server.send_cancel(channel_id)
+            if sent:
+                # Wait up to 3s for the agent process to exit gracefully.
+                for _ in range(30):
+                    if not self._agent_spawner.is_running(channel_id):
+                        break
+                    await asyncio.sleep(0.1)
+
+            # Phase 2: if still running, force-kill.
+            if self._agent_spawner.is_running(channel_id):
+                log.info("Agent on %s didn't stop gracefully, killing", channel_id[:8])
+                await self._agent_spawner.stop(channel_id, resumable=True)
+            else:
+                # Agent exited on its own — just update channel status.
+                self._agent_spawner._store.update_channel_status(channel_id, "idle")
+
         await self._send_frame(
             session, ws,
             payload={
                 "action": "agent_stopped",
                 "channel_id": channel_id,
-                "was_running": stopped,
+                "was_running": was_running,
             },
         )
 
