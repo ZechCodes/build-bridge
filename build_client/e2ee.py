@@ -1067,7 +1067,8 @@ class E2EEHandler:
         """Stop the agent on a channel with two-phase approach.
 
         Phase 1: Send graceful chat.cancel to the agent.
-        Phase 2: If the agent doesn't exit within 3s, kill the process.
+        Phase 2: If the agent doesn't acknowledge (activity.end) within 3s,
+                 kill the process.
         """
         if not self._agent_spawner:
             await self._send_frame(
@@ -1085,24 +1086,18 @@ class E2EEHandler:
             return
 
         was_running = self._agent_spawner.is_running(channel_id)
+        killed = False
 
         if was_running:
-            # Phase 1: graceful cancel.
+            # Phase 1: graceful cancel — agent should emit activity.end.
             sent = await self.agent_server.send_cancel(channel_id)
             if sent:
-                # Wait up to 3s for the agent process to exit gracefully.
-                for _ in range(30):
-                    if not self._agent_spawner.is_running(channel_id):
-                        break
-                    await asyncio.sleep(0.1)
-
-            # Phase 2: if still running, force-kill.
-            if self._agent_spawner.is_running(channel_id):
-                log.info("Agent on %s didn't stop gracefully, killing", channel_id[:8])
-                await self._agent_spawner.stop(channel_id, resumable=True)
-            else:
-                # Agent exited on its own — just update channel status.
-                self._agent_spawner._store.update_channel_status(channel_id, "idle")
+                acked = await self.agent_server.wait_for_cancel_ack(channel_id, timeout=3.0)
+                if not acked:
+                    # Phase 2: agent didn't acknowledge — force-kill.
+                    log.info("Agent on %s didn't ack cancel, killing", channel_id[:8])
+                    await self._agent_spawner.stop(channel_id, resumable=True)
+                    killed = True
 
         await self._send_frame(
             session, ws,
@@ -1110,6 +1105,7 @@ class E2EEHandler:
                 "action": "agent_stopped",
                 "channel_id": channel_id,
                 "was_running": was_running,
+                "killed": killed,
             },
         )
 

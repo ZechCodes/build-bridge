@@ -109,6 +109,7 @@ class AgentServer:
         self._agents: dict[str, AgentConnection] = {}  # agent_id -> connection
         self._channel_to_agent: dict[str, str] = {}  # channel_id -> agent_id
         self._compact_futures: dict[str, asyncio.Future[str]] = {}  # channel_id -> pending summary
+        self._cancel_ack_events: dict[str, asyncio.Event] = {}  # channel_id -> one-shot event
         self._server: Any = None
         self._serve_task: asyncio.Task | None = None
 
@@ -221,6 +222,21 @@ class AgentServer:
             return True
         except Exception:
             return False
+
+    async def wait_for_cancel_ack(self, channel_id: str, timeout: float = 3.0) -> bool:
+        """Wait for the agent to acknowledge cancel via activity.end.
+
+        Returns True if activity.end was received within the timeout.
+        """
+        event = asyncio.Event()
+        self._cancel_ack_events[channel_id] = event
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            self._cancel_ack_events.pop(channel_id, None)
 
     async def send_interaction_response(
         self,
@@ -813,6 +829,11 @@ class AgentServer:
         payload = data["payload"]
         reason = payload.get("reason", "complete")
         usage = payload.get("usage")
+
+        # Signal any pending cancel acknowledgement waiter.
+        ack_event = self._cancel_ack_events.get(agent.channel_id)
+        if ack_event:
+            ack_event.set()
 
         # Store activity entry.
         self.store.store_activity(
