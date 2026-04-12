@@ -14,7 +14,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Coroutine
+from typing import Annotated, Any, Callable, Coroutine
 
 log = logging.getLogger(__name__)
 
@@ -320,10 +320,25 @@ class ChatMCP:
             description=(
                 "Send a message to the user. Use this to communicate with the user "
                 "instead of outputting text directly. The message will be delivered "
-                "to the user's browser."
+                "to the user's browser.\n\n"
+                "You can embed file snippets and diffs in messages:\n"
+                "- [[file]](path/to/file) — embed entire file with syntax highlighting\n"
+                "- [[file 8:18]](path/to/file) — embed lines 8-18\n"
+                "- [[diff]](path/to/file) — embed git diff for file\n"
+                "- [[diff]](file1|file2) — diff two files\n"
+                "Paths are resolved relative to the channel working directory "
+                "(not your shell cwd). Use absolute paths if you've cd'd elsewhere. "
+                "Embeds render with syntax highlighting in the browser."
             ),
         )
-        async def send(message: str, suggested_actions: list[str] | None = None) -> dict:
+        async def send(
+            message: str,
+            suggested_actions: Annotated[
+                list[str] | None,
+                "Optional 2-3 short action labels shown as clickable buttons below "
+                "the message (e.g. ['yes', 'no']). Clicking one sends it as a user message.",
+            ] = None,
+        ) -> dict:
             return await chat.handle_send(message, suggested_actions)
 
         return mcp
