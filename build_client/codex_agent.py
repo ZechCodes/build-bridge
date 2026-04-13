@@ -382,6 +382,7 @@ class CodexHarnessRuntime:
         self.client.on_notification("item/fileChange/outputDelta", self._on_file_change_output_delta)
         self.client.on_notification("item/mcpToolCall/progress", self._on_mcp_progress)
         self.client.on_notification("error", self._on_error)
+        self.client.on_notification("account/rateLimits/updated", self._on_rate_limits_updated)
 
         self.client.on_request("item/commandExecution/requestApproval", self._on_command_approval)
         self.client.on_request("item/fileChange/requestApproval", self._on_file_change_approval)
@@ -465,7 +466,10 @@ class CodexHarnessRuntime:
         if self.effort:
             params["effort"] = self.effort
         if self.plan_mode:
-            params["collaborationMode"] = {"mode": "plan"}
+            params["collaborationMode"] = {
+                "mode": "plan",
+                "settings": {"model": self.model},
+            }
 
         self._last_activity = time.monotonic()
         if self.turn_id:
@@ -621,26 +625,58 @@ class CodexHarnessRuntime:
         if message:
             await self.wrapper.emit_activity_delta("text", message)
 
+    async def _on_rate_limits_updated(self, params: dict[str, Any]) -> None:
+        rate_limits = params.get("rateLimits", {})
+        for window_key in ("primary", "secondary"):
+            window = rate_limits.get(window_key)
+            if not window:
+                continue
+            if window.get("usedPercent", 0) >= 100:
+                if getattr(self, "_quota_error_sent", False):
+                    return
+                self._quota_error_sent = True
+                resets_at = window.get("resetsAt")
+                if resets_at:
+                    from datetime import datetime, timezone
+                    reset_time = datetime.fromtimestamp(resets_at, tz=timezone.utc).astimezone()
+                    msg = f"Usage limit reached. Resets at {reset_time.strftime('%I:%M %p')}."
+                else:
+                    msg = "Usage limit reached."
+                log.warning("Codex quota exhausted: %s", msg)
+                await self.wrapper._send_error(
+                    code="quota_exceeded",
+                    message=msg,
+                    fatal=True,
+                )
+                return
+
     async def _on_error(self, params: dict[str, Any]) -> None:
         error = params.get("error", params)
         message = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+
+        # Suppress error spam once quota has been reported.
+        if getattr(self, "_quota_error_sent", False):
+            return
+
         log.error("Codex app-server error: %s", message)
+
+        msg_lower = message.lower()
 
         # Detect auth errors and surface them to the user.
         auth_keywords = ("refresh token", "sign in again", "token_expired", "401 Unauthorized", "authentication")
-        msg_lower = message.lower()
         if any(kw.lower() in msg_lower for kw in auth_keywords):
             await self.wrapper._send_error(
                 code="auth_expired",
                 message="OpenAI authentication expired. Run `codex auth` in your terminal to sign in again.",
                 fatal=True,
             )
-        else:
-            await self.wrapper._send_error(
-                code="codex_error",
-                message=message,
-                fatal=False,
-            )
+            return
+
+        await self.wrapper._send_error(
+            code="codex_error",
+            message=message,
+            fatal=False,
+        )
 
     async def _on_command_approval(self, _request_id: str | int, params: dict[str, Any]) -> dict[str, Any]:
         log.info("Command approval params: %s", json.dumps(params, default=str)[:500])

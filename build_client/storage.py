@@ -165,6 +165,25 @@ class MessageStore:
         )
         self.db.commit()
 
+    def get_message(self, message_id: str) -> Message | None:
+        """Get a single message by ID."""
+        row = self.db.execute(
+            "SELECT * FROM messages WHERE id = ?", (message_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return Message(
+            id=row["id"],
+            channel_id=row["channel_id"],
+            session_id=row["session_id"],
+            sender=row["sender"],
+            content=row["content"],
+            created_at=row["created_at"],
+            delivered_at=row["delivered_at"],
+            read_at=row["read_at"],
+            attachments=json.loads(row["attachments"]) if row["attachments"] else None,
+        )
+
     def get_messages(
         self,
         channel_id: str,

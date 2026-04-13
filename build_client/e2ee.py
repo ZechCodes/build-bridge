@@ -246,6 +246,8 @@ class E2EEHandler:
             await self._send_activity(session, payload, ws)
         elif action == "message":
             await self._handle_chat_message(session, frame, ws)
+        elif action == "retry_message":
+            await self._retry_message(session, frame, ws)
         elif action == "mark_read":
             await self._mark_read(session, payload, ws)
         elif action == "list_harnesses":
@@ -820,7 +822,7 @@ class E2EEHandler:
                 "No agent server registered — cannot forward message on channel %s",
                 channel_id[:8],
             )
-            await self._send_error_message(session, ws, channel_id, "No agent server available")
+            await self._send_delivery_failed(session, ws, channel_id, message_id)
             return
 
         if not self._agent_server.is_channel_active(channel_id):
@@ -840,10 +842,7 @@ class E2EEHandler:
                 except Exception as exc:
                     log.error("Failed to auto-restart agent on channel %s: %s", channel_id[:8], exc)
             if not restarted:
-                await self._send_system_message(
-                    session, ws, channel_id,
-                    "Failed to restart agent. Try restarting manually.",
-                )
+                await self._send_delivery_failed(session, ws, channel_id, message_id)
                 return
             # Wait briefly for the agent to connect, then retry forwarding.
             for _ in range(10):
@@ -851,10 +850,7 @@ class E2EEHandler:
                 if self._agent_server.is_channel_active(channel_id):
                     break
             else:
-                await self._send_system_message(
-                    session, ws, channel_id,
-                    "Agent is still starting up. Your message will be delivered when it connects.",
-                )
+                await self._send_delivery_failed(session, ws, channel_id, message_id)
                 return
 
         # Enrich attachment metadata with local file paths so agents can read files.
@@ -902,10 +898,55 @@ class E2EEHandler:
                 "(agent lookup succeeded but send failed)",
                 channel_id[:8],
             )
-            await self._send_system_message(
-                session, ws, channel_id,
-                "Message delivery failed. The agent may have disconnected.",
-            )
+            await self._send_delivery_failed(session, ws, channel_id, message_id)
+
+    async def _send_delivery_failed(
+        self,
+        session: ActiveSession,
+        ws: Any,
+        channel_id: str,
+        message_id: str | None,
+    ) -> None:
+        """Notify the browser that a message failed to reach the agent."""
+        await self._send_frame(
+            session, ws,
+            payload={
+                "action": "delivery_failed",
+                "message_id": message_id,
+                "channel_id": channel_id,
+            },
+        )
+
+    async def _retry_message(
+        self,
+        session: ActiveSession,
+        frame: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Re-attempt forwarding a previously failed message to the agent."""
+        payload = frame.get("payload") or {}
+        channel_id = payload.get("channel_id", "")
+        message_id = payload.get("message_id")
+        if not channel_id or not message_id:
+            return
+
+        # Retrieve the stored message content.
+        msg = self.store.get_message(message_id)
+        if not msg:
+            log.warning("Retry: message %s not found in store", message_id)
+            await self._send_delivery_failed(session, ws, channel_id, message_id)
+            return
+
+        # Re-run the delivery flow by constructing a synthetic frame.
+        retry_frame = {
+            "message_id": message_id,
+            "payload": {
+                "action": "message",
+                "channel_id": channel_id,
+                "content": msg.content,
+            },
+        }
+        await self._handle_chat_message(session, retry_frame, ws)
 
     async def _send_system_message(
         self,
@@ -1087,17 +1128,22 @@ class E2EEHandler:
 
         was_running = self._agent_spawner.is_running(channel_id)
         killed = False
+        log.info("stop_agent: channel=%s was_running=%s", channel_id[:8], was_running)
 
         if was_running:
             # Phase 1: graceful cancel — agent should emit activity.end.
-            sent = await self.agent_server.send_cancel(channel_id)
+            sent = await self._agent_server.send_cancel(channel_id)
+            log.info("stop_agent: send_cancel returned %s for %s", sent, channel_id[:8])
             if sent:
-                acked = await self.agent_server.wait_for_cancel_ack(channel_id, timeout=3.0)
+                acked = await self._agent_server.wait_for_cancel_ack(channel_id, timeout=3.0)
+                log.info("stop_agent: cancel ack=%s for %s", acked, channel_id[:8])
                 if not acked:
                     # Phase 2: agent didn't acknowledge — force-kill.
                     log.info("Agent on %s didn't ack cancel, killing", channel_id[:8])
                     await self._agent_spawner.stop(channel_id, resumable=True)
                     killed = True
+            else:
+                log.warning("stop_agent: could not send cancel to %s", channel_id[:8])
 
         await self._send_frame(
             session, ws,
@@ -1124,7 +1170,7 @@ class E2EEHandler:
             )
             return
 
-        sent = await self.agent_server.send_cancel(channel_id)
+        sent = await self._agent_server.send_cancel(channel_id)
         await self._send_frame(
             session, ws,
             payload={
