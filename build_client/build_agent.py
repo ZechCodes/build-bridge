@@ -48,6 +48,12 @@ from build_client.agent_wrapper import AgentWrapper, CHAT_MCP_TOOLS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+# Also log to file for debugging cancel flow.
+_agent_log_dir = Path.home() / ".config" / "build" / "logs"
+_agent_log_dir.mkdir(parents=True, exist_ok=True)
+_agent_fh = logging.FileHandler(_agent_log_dir / "build_agent.log")
+_agent_fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+logging.getLogger().addHandler(_agent_fh)
 
 # ---------------------------------------------------------------------------
 # SDK monkey-patch: prevent premature stdin closure
@@ -728,13 +734,16 @@ async def run_agent(
     active_client: list[ClaudeSDKClient | None] = [None]
 
     async def on_cancel():
+        log.info("on_cancel called — setting cancel_event")
         cancel_event.set()
         client = active_client[0]
         if client:
             try:
+                log.info("Calling client.interrupt()")
                 await client.interrupt()
-            except Exception:
-                pass
+                log.info("client.interrupt() completed")
+            except Exception as exc:
+                log.warning("client.interrupt() failed: %s", exc)
 
     wrapper = AgentWrapper(
         port=port,
@@ -832,15 +841,12 @@ async def run_agent(
     async def _process_response(client_ref: ClaudeSDKClient) -> str | None:
         """Process response messages and capture session_id from ResultMessage.
 
-        Checks cancel_event between each message so cancellation takes effect
-        between tool calls within a turn, not just between turns.
+        Runs to natural completion — cancellation is handled by
+        client.interrupt() which makes the CLI emit a ResultMessage.
         """
         nonlocal last_session_id
         session_id = None
         async for message in client_ref.receive_response():
-            if cancel_event.is_set():
-                log.info("Cancel detected mid-turn, stopping response processing")
-                break
             await handle_response_message(message, wrapper)
             if isinstance(message, ResultMessage):
                 session_id = message.session_id
@@ -855,6 +861,7 @@ async def run_agent(
 
     try:
         # Outer loop: each iteration is a fresh agent context.
+        last_exit_was_cancel = False
         while True:
             # Inject chat context and session history into the system
             # prompt so the agent retains context across restarts and
@@ -887,15 +894,22 @@ async def run_agent(
                             notification = wrapper.chat_mcp.build_unread_notification()
                             prompt = notification or "Check in with the user."
                         else:
-                            # No messages — just notify browser and wait.
-                            await wrapper.emit_system_message("Agent is ready.")
+                            # No messages — notify browser (skip after cancel
+                            # since the agent is just returning to idle).
+                            if not last_exit_was_cancel:
+                                await wrapper.emit_system_message("Agent is ready.")
                             prompt = None
+                    last_exit_was_cancel = False
                     next_prompt = None
 
-                    async def _run_query_cancellable(client_ref: ClaudeSDKClient) -> bool:
-                        """Run _process_response, cancelling it if cancel_event fires.
+                    async def _run_query_cancellable(client_ref: ClaudeSDKClient) -> str:
+                        """Run _process_response with interrupt-based cancel.
 
-                        Returns True if the query was cancelled, False if it completed.
+                        Returns:
+                            "completed" — turn finished naturally.
+                            "cancelled" — interrupted cleanly via client.interrupt().
+                            "cancelled_forced" — interrupt timed out, task was force-cancelled.
+                                Client may be in a bad state; caller should recreate.
                         """
                         process_task = asyncio.create_task(_process_response(client_ref))
                         cancel_waiter = asyncio.create_task(cancel_event.wait())
@@ -905,32 +919,57 @@ async def run_agent(
                             return_when=asyncio.FIRST_COMPLETED,
                         )
 
-                        if cancel_waiter in done:
-                            # Cancel arrived — abort the response processing.
+                        if process_task in done:
+                            # Turn completed naturally (possibly after interrupt
+                            # already fired — that's fine).
+                            cancel_waiter.cancel()
+                            process_task.result()
+                            was_interrupted = cancel_event.is_set()
+                            if was_interrupted:
+                                cancel_event.clear()
+                                log.info("Turn completed after interrupt")
+                                return "cancelled"
+                            return "completed"
+
+                        # Cancel won the race. interrupt() was already called by
+                        # on_cancel — give the CLI time to emit ResultMessage.
+                        log.info("Cancel requested, waiting for clean turn shutdown")
+                        try:
+                            await asyncio.wait_for(asyncio.shield(process_task), timeout=5.0)
+                            try:
+                                process_task.result()
+                            except Exception:
+                                pass
+                            cancel_event.clear()
+                            log.info("Turn stopped cleanly after interrupt")
+                            return "cancelled"
+                        except asyncio.TimeoutError:
+                            log.warning("Turn didn't stop within 5s after interrupt, force-cancelling")
                             process_task.cancel()
                             try:
                                 await process_task
                             except asyncio.CancelledError:
                                 pass
                             cancel_event.clear()
-                            return True
-                        else:
-                            cancel_waiter.cancel()
-                            # Propagate any exception from the process task.
-                            process_task.result()
-                            return False
+                            return "cancelled_forced"
 
                     # Initial query (skip if no prompt — agent is idle).
                     exit_reason = "context_ended"
                     if prompt:
                         log.info("Sending initial prompt to agent")
                         await client.query(prompt)
-                        if await _run_query_cancellable(client):
+                        result = await _run_query_cancellable(client)
+                        if result == "cancelled":
+                            log.info("Initial query interrupted cleanly")
+                            await wrapper.emit_activity_end("cancelled")
+                            # Stay in the inner loop — same client, same session.
+                        elif result == "cancelled_forced":
+                            log.warning("Initial query force-cancelled, recreating client")
+                            await wrapper.emit_activity_end("cancelled")
                             exit_reason = "cancelled"
-                            log.info("Cancel during initial query")
 
                     # Message loop — wait for user messages and inject them.
-                    while exit_reason != "cancelled":
+                    while exit_reason == "context_ended":
                         # Race message wait against cancel event.
                         msg_task = asyncio.create_task(
                             wrapper.chat_mcp.wait_for_unread(timeout=5.0)
@@ -949,9 +988,10 @@ async def run_agent(
                             except asyncio.CancelledError:
                                 pass
                             cancel_event.clear()
-                            exit_reason = "cancelled"
-                            log.info("Cancel received, breaking inner loop")
-                            break
+                            # Agent is idle — nothing to cancel. Ack and continue.
+                            log.info("Cancel while idle, acking")
+                            await wrapper.emit_activity_end("cancelled")
+                            continue
                         else:
                             cancel_waiter.cancel()
                             has_msg = msg_task.result()
@@ -984,9 +1024,15 @@ async def run_agent(
                         notification = await wrapper.chat_mcp.drain_unread_notification()
                         if notification:
                             await client.query(notification)
-                            if await _run_query_cancellable(client):
+                            result = await _run_query_cancellable(client)
+                            if result == "cancelled":
+                                log.info("Query interrupted cleanly")
+                                await wrapper.emit_activity_end("cancelled")
+                                # Stay in inner loop — back to waiting.
+                            elif result == "cancelled_forced":
+                                log.warning("Query force-cancelled, recreating client")
+                                await wrapper.emit_activity_end("cancelled")
                                 exit_reason = "cancelled"
-                                log.info("Cancel during query")
                                 break
 
             except Exception as client_err:
@@ -1002,9 +1048,10 @@ async def run_agent(
             # Client exited — log and decide whether to loop.
             log.info("Agent context ended (%s)", exit_reason)
 
-            # Emit activity.end so the device knows the cancel was acknowledged.
+            # activity.end is now emitted inline when cancel happens,
+            # so we just track the flag for the "Agent is ready." suppression.
             if exit_reason == "cancelled":
-                await wrapper.emit_activity_end("cancelled")
+                last_exit_was_cancel = True
 
             if not wrapper.is_connected:
                 break

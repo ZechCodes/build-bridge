@@ -211,16 +211,20 @@ class AgentServer:
         """Send chat.cancel to the agent on a channel."""
         agent_id = self._channel_to_agent.get(channel_id)
         if not agent_id:
+            log.warning("send_cancel: no agent mapped for channel %s", channel_id[:8])
             return False
         agent = self._agents.get(agent_id)
         if not agent:
+            log.warning("send_cancel: agent %s not found for channel %s", agent_id[:8], channel_id[:8])
             return False
 
         envelope = make_envelope("chat.cancel", {})
         try:
             await agent.ws.send(json.dumps(envelope))
+            log.info("Sent chat.cancel to agent %s on channel %s", agent_id[:8], channel_id[:8])
             return True
-        except Exception:
+        except Exception as exc:
+            log.error("Failed to send chat.cancel to agent: %s", exc)
             return False
 
     async def wait_for_cancel_ack(self, channel_id: str, timeout: float = 3.0) -> bool:

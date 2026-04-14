@@ -147,35 +147,59 @@ class CodexAppServerClient:
 
     async def _read_stdout(self) -> None:
         assert self._process and self._process.stdout
+        buf = b""
         try:
             while True:
-                raw = await self._process.stdout.readline()
-                if not raw:
+                chunk = await self._process.stdout.read(1048576)  # 1MB chunks
+                if not chunk:
+                    log.warning(
+                        "Codex app-server stdout EOF (pid=%s, returncode=%s)",
+                        self._process.pid,
+                        self._process.returncode,
+                    )
                     break
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
+                buf += chunk
+                while b"\n" in buf:
+                    line_bytes, buf = buf.split(b"\n", 1)
+                    line = line_bytes.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
 
-                try:
-                    message = json.loads(line)
-                except json.JSONDecodeError:
-                    log.debug("Ignoring non-JSON app-server stdout line: %s", line)
-                    continue
+                    try:
+                        message = json.loads(line)
+                    except json.JSONDecodeError:
+                        log.debug("Ignoring non-JSON app-server stdout line: %s", line[:200])
+                        continue
 
-                log.info("App-server message: id=%s method=%s", message.get("id"), message.get("method", "(response)"))
-                await self._handle_message(message)
+                    log.info("App-server message: id=%s method=%s", message.get("id"), message.get("method", "(response)"))
+                    await self._handle_message(message)
+        except Exception:
+            log.exception("Codex app-server stdout reader crashed")
         finally:
             self._fail_pending(CodexAppServerError("Codex app-server stdout closed"))
 
     async def _read_stderr(self) -> None:
         assert self._process and self._process.stderr
-        while True:
-            raw = await self._process.stderr.readline()
-            if not raw:
-                return
-            line = raw.decode("utf-8", errors="replace").rstrip()
-            if line:
-                log.info("[codex-app-server] %s", line)
+        buf = b""
+        try:
+            while True:
+                chunk = await self._process.stderr.read(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                # Process complete lines, keep partial line in buf
+                while b"\n" in buf:
+                    line_bytes, buf = buf.split(b"\n", 1)
+                    line = line_bytes.decode("utf-8", errors="replace").rstrip()
+                    if line:
+                        log.info("[codex-app-server] %s", line)
+            # Flush remaining partial line
+            if buf:
+                line = buf.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    log.info("[codex-app-server] %s", line)
+        except Exception:
+            log.debug("Error reading codex app-server stderr", exc_info=True)
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         if "method" in message and "id" in message:
