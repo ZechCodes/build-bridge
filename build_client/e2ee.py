@@ -1699,12 +1699,17 @@ class E2EEHandler:
             except ValueError:
                 cwd_rel = repo_rel
 
+            try:
+                mtime = abs_path.stat().st_mtime
+            except OSError:
+                mtime = 0
+
             entries.append({
                 "name": os.path.basename(repo_rel),
                 "path": cwd_rel,
                 "type": "file",
                 "size": 0,
-                "modified": 0,
+                "modified": mtime,
                 "git_status": unstaged if unstaged.strip() else None,
                 "staged_status": staged if staged.strip() else None,
                 "insertions": ins,
