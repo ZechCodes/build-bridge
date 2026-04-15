@@ -792,7 +792,7 @@ class E2EEHandler:
             return
 
         # Store the incoming message from the client.
-        self.store.store_message(
+        stored = self.store.store_message(
             message_id=message_id,
             channel_id=channel_id,
             session_id=session.session_id,
@@ -811,6 +811,20 @@ class E2EEHandler:
                 "channel_id": channel_id,
             },
         )
+
+        # Broadcast to all sessions so other browsers see the message.
+        # The originating browser deduplicates by message ID.
+        await self.broadcast_to_sessions(channel_id, {
+            "action": "message",
+            "message": {
+                "id": message_id,
+                "channel_id": channel_id,
+                "sender": "client",
+                "content": content,
+                "created_at": stored.created_at,
+                "attachments": attachments,
+            },
+        })
 
         # NOTE: We do NOT mark as read here. The message is marked read when
         # the agent calls read_unread via the Chat MCP tool. See
