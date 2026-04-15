@@ -35,7 +35,9 @@ log = logging.getLogger(__name__)
 CHAT_CONTEXT = (
     "IMPORTANT: You are connected to the user through Build's remote chat bridge.\n"
     "- The user cannot see your raw harness output.\n"
-    "- Use the build-chat MCP server's send tool for every user-visible reply.\n"
+    "- Use the build-chat MCP server's send tool to communicate with the user. "
+    "Use it while you're working to keep the user looped in on progress, "
+    "important findings, and important decisions.\n"
     "- Use the build-chat MCP server's read_unread tool when notified about unread user messages.\n"
     "- Keep user-visible replies concise and natural.\n"
     "- Treat planning mode instructions from the system as authoritative.\n"

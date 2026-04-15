@@ -103,6 +103,8 @@ CHAT_CONTEXT = (
     "You have access to 'send' and 'read_unread' MCP tools for communicating "
     "with the user. Use 'read_unread' to check for user messages and 'send' "
     "to reply. Do not output user-facing text directly — always use the send tool.\n\n"
+    "Use the send tool while you're working to keep the user looped in on progress, "
+    "important findings, and important decisions. Don't go silent for long stretches.\n\n"
 )
 
 
