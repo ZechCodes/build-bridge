@@ -674,6 +674,20 @@ class CodexHarnessRuntime:
             )
             return
 
+        # Detect usage limit errors (e.g. from Codex's internal compact task)
+        # and treat like quota — send once, then suppress.
+        usage_keywords = ("usage limit", "hit your usage limit", "upgrade to pro", "purchase more credits")
+        if any(kw in msg_lower for kw in usage_keywords):
+            if getattr(self, "_quota_error_sent", False):
+                return
+            self._quota_error_sent = True
+            await self.wrapper._send_error(
+                code="quota_exceeded",
+                message=message,
+                fatal=True,
+            )
+            return
+
         await self.wrapper._send_error(
             code="codex_error",
             message=message,
