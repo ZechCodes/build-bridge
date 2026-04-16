@@ -1098,7 +1098,7 @@ def main() -> None:
     parser.add_argument("--working-directory", default=os.environ.get("BUILD_WORKING_DIR"),
                         help="Working directory for the agent")
     parser.add_argument("--effort", default=os.environ.get("BUILD_AGENT_EFFORT"),
-                        help="Thinking effort level (low, medium, high, max)")
+                        help="Thinking effort level (low, medium, high, xhigh, max)")
     parser.add_argument("--resume-session", default=None,
                         help="Session ID to resume from a previous session")
     args = parser.parse_args()

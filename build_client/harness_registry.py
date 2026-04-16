@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -37,6 +37,8 @@ class HarnessInfo:
     binary: str
     models: list[ModelInfo]
     default_model: str
+    default_effort: str = ""
+    effort_levels: list[str] = field(default_factory=list)
     installed: bool = False
 
 
@@ -61,6 +63,8 @@ def _load_harnesses() -> list[HarnessInfo]:
                 binary=data.get("binary", ""),
                 models=models,
                 default_model=data.get("default_model", models[0].id if models else ""),
+                default_effort=data.get("default_effort", ""),
+                effort_levels=list(data.get("effort_levels", [])),
             ))
         except Exception as exc:
             log.warning("Failed to load harness from %s: %s", path, exc)
@@ -92,6 +96,8 @@ def detect_installed() -> list[HarnessInfo]:
             binary=harness.binary,
             models=harness.models,
             default_model=harness.default_model,
+            default_effort=harness.default_effort,
+            effort_levels=harness.effort_levels,
             installed=installed,
         ))
     return result
@@ -117,6 +123,8 @@ def serialize_harnesses(harnesses: list[HarnessInfo]) -> list[dict]:
                 for m in h.models
             ],
             "default_model": h.default_model,
+            "default_effort": h.default_effort,
+            "effort_levels": list(h.effort_levels),
             "installed": h.installed,
         }
         for h in harnesses
