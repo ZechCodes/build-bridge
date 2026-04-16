@@ -9,7 +9,7 @@ description = "Build device client — authenticates with the Build server and m
 requires-python = ">=3.12"
 dependencies = [
     "build-secure-transport",
-    "claude-agent-sdk>=0.1.0",
+    "claude-agent-sdk>=0.1.60",
     "cryptography>=44.0.0",
     "httpx>=0.28.0",
     "mcp>=1.6.0",
