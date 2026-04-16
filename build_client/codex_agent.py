@@ -513,7 +513,14 @@ class CodexHarnessRuntime:
                 await self.wrapper.emit_activity_ping()
 
     async def _hang_watchdog_loop(self) -> None:
-        """Detect hung Codex subprocess during active turns and kill it."""
+        """Detect hung Codex subprocess during active turns and kill it.
+
+        Exits the agent process with a non-zero code so agent_spawner's
+        auto-restart fires. Killing just the Codex subprocess is not enough:
+        the agent process's run() loop would keep running with a dead client,
+        and run_agent() catches the downstream CodexAppServerError as a clean
+        exit — auto-restart only triggers on non-zero process exit.
+        """
         while True:
             await asyncio.sleep(WATCHDOG_INTERVAL_S)
             if not self.turn_id:
@@ -521,7 +528,7 @@ class CodexHarnessRuntime:
             idle = time.monotonic() - self._last_activity
             if idle > HANG_THRESHOLD_S:
                 log.error(
-                    "Codex subprocess hung: no activity for %.1fs during turn %s. Killing.",
+                    "Codex subprocess hung: no activity for %.1fs during turn %s. Exiting for auto-restart.",
                     idle, self.turn_id,
                 )
                 self._hang_detected = True
@@ -529,7 +536,13 @@ class CodexHarnessRuntime:
                     await self.client.stop()
                 except Exception:
                     log.exception("Error stopping hung Codex client")
-                return
+                try:
+                    await self.wrapper.emit_system_message(
+                        "Codex subprocess stopped responding — restarting agent."
+                    )
+                except Exception:
+                    log.debug("Failed to emit hang notice", exc_info=True)
+                os._exit(1)
 
     async def _on_turn_started(self, params: dict[str, Any]) -> None:
         turn = params.get("turn", {})
