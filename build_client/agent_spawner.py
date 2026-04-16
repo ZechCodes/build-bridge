@@ -12,6 +12,7 @@ import logging
 import os
 import signal
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -19,6 +20,11 @@ from typing import Any
 from build_client.agent_store import AgentStore
 
 log = logging.getLogger(__name__)
+
+RESTART_BACKOFF_BASE_S = 1.0
+RESTART_BACKOFF_MAX_S = 30.0
+MAX_RESTART_ATTEMPTS = 5
+RESTART_ATTEMPTS_RESET_AFTER_S = 300.0  # reset counter after 5 min of stability
 
 
 _HARNESS_MODULES: dict[str, str] = {
@@ -68,6 +74,9 @@ class AgentSpawner:
         self._agent_host = agent_host
         self._workers: dict[str, WorkerInfo] = {}  # channel_id -> WorkerInfo
         self._monitor_tasks: dict[str, asyncio.Task] = {}
+        # Tracks auto-restart attempts per channel: (attempts, last_restart_ts).
+        # Survives WorkerInfo replacement so counter persists across respawns.
+        self._restart_state: dict[str, tuple[int, float]] = {}
 
     @property
     def workers(self) -> dict[str, WorkerInfo]:
@@ -244,6 +253,9 @@ class AgentSpawner:
         # Update channel status.
         self._store.update_channel_status(channel_id, "idle" if resumable else "closed")
 
+        # Clear auto-restart state — user-initiated stop should start fresh on next start.
+        self._restart_state.pop(channel_id, None)
+
         return True
 
     async def stop_all(self, *, resumable: bool = False) -> None:
@@ -354,8 +366,51 @@ class AgentSpawner:
                 "closed" if returncode == 0 else "error",
             )
 
+            # Auto-restart on unexpected non-zero exit.
+            # User-initiated stops cancel this monitor task before process exit,
+            # so they never reach this branch.
+            if returncode != 0:
+                self._maybe_schedule_auto_restart(worker.channel_id)
+
         except asyncio.CancelledError:
             pass
+
+    def _maybe_schedule_auto_restart(self, channel_id: str) -> None:
+        """Schedule an auto-restart with exponential backoff, up to MAX_RESTART_ATTEMPTS."""
+        attempts, last_ts = self._restart_state.get(channel_id, (0, 0.0))
+        now = time.time()
+        # Reset counter if the agent ran stably for a while.
+        if last_ts and now - last_ts > RESTART_ATTEMPTS_RESET_AFTER_S:
+            attempts = 0
+        if attempts >= MAX_RESTART_ATTEMPTS:
+            log.error(
+                "Agent on channel %s exited %d times in a row; giving up auto-restart.",
+                channel_id[:8], attempts,
+            )
+            self._restart_state.pop(channel_id, None)
+            return
+        backoff = min(
+            RESTART_BACKOFF_BASE_S * (2 ** attempts),
+            RESTART_BACKOFF_MAX_S,
+        )
+        self._restart_state[channel_id] = (attempts + 1, now)
+        log.warning(
+            "Auto-restarting agent on channel %s (attempt %d) after %.1fs backoff",
+            channel_id[:8], attempts + 1, backoff,
+        )
+        asyncio.create_task(self._auto_restart(channel_id, backoff))
+
+    async def _auto_restart(self, channel_id: str, backoff: float) -> None:
+        await asyncio.sleep(backoff)
+        # Channel may have been deleted during backoff.
+        channel = self._store.get_channel(channel_id)
+        if not channel:
+            self._restart_state.pop(channel_id, None)
+            return
+        try:
+            await self.restart(channel_id)
+        except Exception:
+            log.exception("Auto-restart failed for channel %s", channel_id[:8])
 
     # -----------------------------------------------------------------
     # Status

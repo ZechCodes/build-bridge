@@ -44,6 +44,9 @@ CHAT_CONTEXT = (
 )
 
 PING_INTERVAL_S = 5.0
+HANG_THRESHOLD_S = 120.0
+WATCHDOG_INTERVAL_S = 15.0
+QUOTA_ERROR_DEDUP_S = 60.0
 CHAT_SERVER_NAME = "build-chat"
 CHAT_TOOL_NAMES = frozenset({"read_unread", "send"})
 
@@ -261,6 +264,8 @@ class CodexHarnessRuntime:
         self._cancel_event = asyncio.Event()
         self._last_activity = time.monotonic()
         self._unread_notified = False
+        self._last_quota_error_ts = 0.0
+        self._hang_detected = False
 
     async def run(self) -> None:
         self._register_handlers()
@@ -319,6 +324,7 @@ class CodexHarnessRuntime:
             await self.wrapper.emit_system_message("Agent is ready.")
 
         ping_task = asyncio.create_task(self._ping_loop())
+        watchdog_task = asyncio.create_task(self._hang_watchdog_loop())
         try:
             while self.wrapper.is_connected:
                 if self._cancel_event.is_set():
@@ -352,11 +358,12 @@ class CodexHarnessRuntime:
                     continue
                 await self._start_or_steer(notification)
         finally:
-            ping_task.cancel()
-            try:
-                await ping_task
-            except asyncio.CancelledError:
-                pass
+            for task in (ping_task, watchdog_task):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     def cancel(self) -> None:
         self._cancel_event.set()
@@ -485,7 +492,8 @@ class CodexHarnessRuntime:
             except CodexAppServerError:
                 self.turn_id = None
 
-        await self.client.send_request("turn/start", params)
+        # turn/start can run for minutes — rely on _hang_watchdog_loop for liveness.
+        await self.client.send_request("turn/start", params, timeout=None)
 
     async def _interrupt_turn(self) -> None:
         if not self.thread_id or not self.turn_id:
@@ -494,7 +502,7 @@ class CodexHarnessRuntime:
             await self.client.send_request("turn/interrupt", {
                 "threadId": self.thread_id,
                 "turnId": self.turn_id,
-            })
+            }, timeout=10.0)
         except CodexAppServerError as exc:
             log.warning("Failed to interrupt Codex turn: %s", exc)
 
@@ -503,6 +511,25 @@ class CodexHarnessRuntime:
             await asyncio.sleep(PING_INTERVAL_S)
             if self.turn_id and time.monotonic() - self._last_activity >= PING_INTERVAL_S:
                 await self.wrapper.emit_activity_ping()
+
+    async def _hang_watchdog_loop(self) -> None:
+        """Detect hung Codex subprocess during active turns and kill it."""
+        while True:
+            await asyncio.sleep(WATCHDOG_INTERVAL_S)
+            if not self.turn_id:
+                continue
+            idle = time.monotonic() - self._last_activity
+            if idle > HANG_THRESHOLD_S:
+                log.error(
+                    "Codex subprocess hung: no activity for %.1fs during turn %s. Killing.",
+                    idle, self.turn_id,
+                )
+                self._hang_detected = True
+                try:
+                    await self.client.stop()
+                except Exception:
+                    log.exception("Error stopping hung Codex client")
+                return
 
     async def _on_turn_started(self, params: dict[str, Any]) -> None:
         turn = params.get("turn", {})
@@ -634,9 +661,10 @@ class CodexHarnessRuntime:
             if not window:
                 continue
             if window.get("usedPercent", 0) >= 100:
-                if getattr(self, "_quota_error_sent", False):
+                now = time.monotonic()
+                if now - self._last_quota_error_ts < QUOTA_ERROR_DEDUP_S:
                     return
-                self._quota_error_sent = True
+                self._last_quota_error_ts = now
                 resets_at = window.get("resetsAt")
                 if resets_at:
                     from datetime import datetime, timezone
@@ -656,10 +684,6 @@ class CodexHarnessRuntime:
         error = params.get("error", params)
         message = error.get("message", str(error)) if isinstance(error, dict) else str(error)
 
-        # Suppress error spam once quota has been reported.
-        if getattr(self, "_quota_error_sent", False):
-            return
-
         log.error("Codex app-server error: %s", message)
 
         msg_lower = message.lower()
@@ -675,12 +699,14 @@ class CodexHarnessRuntime:
             return
 
         # Detect usage limit errors (e.g. from Codex's internal compact task)
-        # and treat like quota — send once, then suppress.
+        # and treat like quota — dedup on a time window so transient storms
+        # don't spam, but later unrelated errors aren't permanently silenced.
         usage_keywords = ("usage limit", "hit your usage limit", "upgrade to pro", "purchase more credits")
         if any(kw in msg_lower for kw in usage_keywords):
-            if getattr(self, "_quota_error_sent", False):
+            now = time.monotonic()
+            if now - self._last_quota_error_ts < QUOTA_ERROR_DEDUP_S:
                 return
-            self._quota_error_sent = True
+            self._last_quota_error_ts = now
             await self.wrapper._send_error(
                 code="quota_exceeded",
                 message=message,

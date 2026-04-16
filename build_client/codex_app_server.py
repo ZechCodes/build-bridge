@@ -110,7 +110,13 @@ class CodexAppServerClient:
         self._stdout_task = None
         self._stderr_task = None
 
-    async def send_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def send_request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        timeout: float | None = 30.0,
+    ) -> dict[str, Any]:
         if not self.is_running:
             raise CodexAppServerError("Codex app-server is not running")
 
@@ -129,10 +135,17 @@ class CodexAppServerClient:
         })
 
         try:
-            result = await future
+            if timeout is None:
+                result = await future
+            else:
+                result = await asyncio.wait_for(future, timeout=timeout)
             if not isinstance(result, dict):
                 raise CodexAppServerError(f"{method} returned non-object result: {result!r}")
             return result
+        except asyncio.TimeoutError as exc:
+            raise CodexAppServerError(
+                f"{method} timed out after {timeout}s"
+            ) from exc
         finally:
             self._pending.pop(request_id, None)
 

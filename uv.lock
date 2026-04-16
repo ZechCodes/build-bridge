@@ -55,7 +55,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "build-secure-transport", directory = "../build-secure-transport/python" },
-    { name = "claude-agent-sdk", specifier = ">=0.1.0" },
+    { name = "claude-agent-sdk", specifier = ">=0.1.60" },
     { name = "cryptography", specifier = ">=44.0.0" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "mcp", specifier = ">=1.6.0" },
