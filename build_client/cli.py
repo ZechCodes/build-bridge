@@ -1,11 +1,12 @@
 """CLI entry point for the Build device client.
 
 Usage:
-    build-device                     # Start the daemon
-    build-device start               # Same as above
+    build-device                     # Start the daemon (in background)
+    build-device start [-f]          # Start the daemon (--foreground to run inline)
     build-device stop [--keep-agents]  # Stop the daemon
     build-device restart             # Restart the daemon
     build-device status              # Show daemon status
+    build-device logs [-f] [-n N]    # Show daemon logs (--follow to tail)
     build-device agents              # List running agents
     build-device agent-stop <ch>     # Stop an agent
     build-device agent-restart <ch>  # Restart an agent
@@ -203,6 +204,10 @@ def main() -> None:
         "--no-watchdog", action="store_true",
         help="Run without crash recovery watchdog",
     )
+    p_start.add_argument(
+        "-f", "--foreground", action="store_true",
+        help="Run in the foreground (default: detach into background)",
+    )
 
     # stop
     p_stop = sub.add_parser("stop", help="Stop the daemon")
@@ -217,6 +222,17 @@ def main() -> None:
 
     # status
     sub.add_parser("status", help="Show daemon status")
+
+    # logs
+    p_logs = sub.add_parser("logs", help="Show daemon logs")
+    p_logs.add_argument(
+        "-f", "--follow", action="store_true",
+        help="Follow new log output as it is written",
+    )
+    p_logs.add_argument(
+        "-n", "--lines", type=int, default=50,
+        help="Number of trailing lines to show (default: 50)",
+    )
 
     # agents
     sub.add_parser("agents", help="List running agents")
@@ -239,6 +255,7 @@ def main() -> None:
         args.reset = False
         args.agent_port = int(os.environ.get("BUILD_AGENT_PORT", str(DEFAULT_AGENT_PORT)))
         args.no_watchdog = False
+        args.foreground = False
         command = "start"
 
     if command == "start":
@@ -249,6 +266,8 @@ def main() -> None:
         _cmd_restart(args)
     elif command == "status":
         _cmd_status()
+    elif command == "logs":
+        _cmd_logs(args)
     elif command == "agents":
         _cmd_agents()
     elif command == "agent-stop":
@@ -260,11 +279,23 @@ def main() -> None:
 def _cmd_start(args: argparse.Namespace) -> None:
     from build_client.daemon import main_with_watchdog, run_daemon
     from build_client.ctl import is_running
+    from build_client.config import load_config
 
     running, pid = is_running()
     if running:
         print(f"Daemon is already running (PID {pid}).")
         sys.exit(1)
+
+    # First-time setup needs interactive auth — can't background.
+    needs_auth = args.reset or load_config() is None
+    if needs_auth and not args.foreground:
+        print("First run needs interactive device auth — staying in the foreground.")
+        print("After auth, stop and re-run `start` to detach.")
+        args.foreground = True
+
+    if not args.foreground:
+        _spawn_detached(args)
+        return
 
     try:
         if args.no_watchdog:
@@ -273,6 +304,44 @@ def _cmd_start(args: argparse.Namespace) -> None:
             asyncio.run(main_with_watchdog(args.url, reset=args.reset, agent_port=args.agent_port))
     except KeyboardInterrupt:
         pass
+
+
+def _spawn_detached(args: argparse.Namespace) -> None:
+    """Re-exec ourselves in the background with --foreground, then return."""
+    import subprocess
+    import time
+    from build_client.ctl import is_running
+
+    cmd = [
+        sys.executable, "-m", "build_client.cli", "start", "--foreground",
+        "--url", args.url,
+        "--agent-port", str(args.agent_port),
+    ]
+    if args.no_watchdog:
+        cmd.append("--no-watchdog")
+
+    print("Starting daemon in background...", end=" ", flush=True)
+    subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+
+    # Poll for ~5s for the daemon to come up.
+    for _ in range(50):
+        time.sleep(0.1)
+        running, pid = is_running()
+        if running:
+            print(f"running (PID {pid}).")
+            print(f"Logs: {LOG_DIR / 'device.log'}")
+            print("Tail with: build-device logs -f")
+            return
+    print("daemon did not become ready within 5s.")
+    print(f"Check logs: {LOG_DIR / 'device.log'}")
+    sys.exit(1)
 
 
 def _cmd_stop(args: argparse.Namespace) -> None:
@@ -325,6 +394,32 @@ def _cmd_status() -> None:
             print(f"Error: {resp.get('error')}")
     except ConnectionError:
         print(f"Build device client: running (PID {pid}) but not responding")
+
+
+def _cmd_logs(args: argparse.Namespace) -> None:
+    import shutil
+    import subprocess
+
+    log_path = LOG_DIR / "device.log"
+    if not log_path.exists():
+        print(f"No log file found at {log_path}", file=sys.stderr)
+        sys.exit(1)
+
+    tail = shutil.which("tail")
+    if not tail:
+        print("`tail` not found on PATH; cannot display logs.", file=sys.stderr)
+        sys.exit(1)
+
+    cmd = [tail, "-n", str(args.lines)]
+    if args.follow:
+        # -F follows the file across rotation (RotatingFileHandler renames).
+        cmd.append("-F")
+    cmd.append(str(log_path))
+
+    try:
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        pass
 
 
 def _cmd_agents() -> None:
