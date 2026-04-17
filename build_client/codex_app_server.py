@@ -322,9 +322,13 @@ def _summarize_message(message: dict[str, Any]) -> str:
         cmd = item.get("command") or item.get("commandExecution")
         if isinstance(cmd, dict) and cmd.get("command"):
             extras.append(f"cmd={str(cmd.get('command'))[:80]!r}")
-        tool = item.get("tool") or item.get("toolCall")
-        if isinstance(tool, dict) and tool.get("name"):
-            extras.append(f"tool={tool.get('name')!r}")
+        # MCP tool calls carry tool/server as top-level strings on the item.
+        if item.get("tool"):
+            extras.append(f"tool={item.get('tool')!r}")
+        if item.get("server"):
+            extras.append(f"server={item.get('server')!r}")
+        if item.get("status"):
+            extras.append(f"status={item.get('status')!r}")
 
     turn = params.get("turn")
     if isinstance(turn, dict):
