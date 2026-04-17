@@ -148,6 +148,28 @@ def _text_from_dynamic_content(content_items: list[dict[str, Any]] | None) -> st
     return "\n".join(part for part in parts if part)
 
 
+def _text_from_agent_message(item: dict[str, Any]) -> str:
+    """Extract plain text from an agentMessage item's content.
+
+    Codex ships agent replies as either:
+      - a `text` string field, or
+      - a `content` array with {"type": "text", "text": "..."} blocks.
+    """
+    direct = item.get("text")
+    if isinstance(direct, str) and direct:
+        return direct
+    content = item.get("content")
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") in ("text", "output_text") and block.get("text"):
+            parts.append(str(block.get("text")))
+    return "\n".join(parts)
+
+
 def _tool_result_from_item(item: dict[str, Any], buffered_output: str) -> tuple[str, bool]:
     item_type = item.get("type")
     if item_type == "commandExecution":
@@ -277,6 +299,11 @@ class CodexHarnessRuntime:
         # approved "for session" — repeat requests within the same agent
         # lifetime auto-accept without prompting again.
         self._session_approved: set[str] = set()
+        # Tracks whether Codex called the build-chat `send` MCP tool during
+        # the current turn. If it didn't, we fall back to emitting the
+        # terminal `agentMessage` content as the chat response so the user
+        # sees Codex's reply even when the model skips the tool call.
+        self._turn_used_send: bool = False
 
     async def run(self) -> None:
         self._register_handlers()
@@ -590,6 +617,7 @@ class CodexHarnessRuntime:
         turn = params.get("turn", {})
         self.turn_id = turn.get("id")
         self._last_activity = time.monotonic()
+        self._turn_used_send = False
 
     async def _on_turn_completed(self, params: dict[str, Any]) -> None:
         turn = params.get("turn", {})
@@ -674,7 +702,31 @@ class CodexHarnessRuntime:
     async def _on_item_completed(self, params: dict[str, Any]) -> None:
         self._last_activity = time.monotonic()
         item = params.get("item", {})
+
+        # Track when Codex calls our own build-chat `send` tool so we can
+        # decide whether the terminal agentMessage needs fallback surfacing.
+        if _is_chat_bridge_tool(item) and item.get("tool") == "send":
+            self._turn_used_send = True
+
         if _is_chat_bridge_tool(item):
+            return
+
+        # agentMessage is Codex's direct text response. Modern Codex emits
+        # the full content in item/completed with no streaming deltas, so
+        # if we don't read it here we lose the reply entirely. Surface it
+        # to the chat when the model didn't use the send tool this turn.
+        if item.get("type") == "agentMessage":
+            if not self._turn_used_send:
+                text = _text_from_agent_message(item)
+                if text.strip():
+                    log.info(
+                        "Surfacing agentMessage fallback (%d chars) — no send call this turn",
+                        len(text),
+                    )
+                    try:
+                        await self.wrapper.chat_mcp.handle_send(text)
+                    except Exception:
+                        log.exception("Failed to surface agentMessage fallback")
             return
 
         item_id = item.get("id")
