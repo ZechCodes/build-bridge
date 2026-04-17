@@ -40,6 +40,7 @@ class AgentChannel:
     last_seen_at: str | None = None
     effort: str = ""
     resume_cursor: str = ""  # JSON: session_id (Claude) or thread_id (Codex)
+    auto_approve_tools: bool = False
 
 
 @dataclass
@@ -163,6 +164,10 @@ class AgentStore:
             "ALTER TABLE chat_messages ADD COLUMN suggested_actions TEXT",
             "ALTER TABLE agent_channels ADD COLUMN effort TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE agent_channels ADD COLUMN resume_cursor TEXT NOT NULL DEFAULT ''",
+            # Existing channels migrate with auto_approve_tools=1 so behavior
+            # matches what users experienced before the feature landed. New
+            # channels default to 0 via the explicit INSERT in create_channel().
+            "ALTER TABLE agent_channels ADD COLUMN auto_approve_tools INTEGER NOT NULL DEFAULT 1",
         ):
             try:
                 self.db.execute(stmt)
@@ -180,14 +185,15 @@ class AgentStore:
         model: str,
         system_prompt: str = "",
         working_directory: str = "",
+        auto_approve_tools: bool = False,
     ) -> AgentChannel:
         """Create a new agent channel."""
         now = now_iso()
         self.db.execute(
             """INSERT INTO agent_channels
-               (id, agent_id, harness, model, system_prompt, working_directory, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
-            (channel_id, agent_id, harness, model, system_prompt, working_directory, now, now),
+               (id, agent_id, harness, model, system_prompt, working_directory, status, created_at, updated_at, auto_approve_tools)
+               VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
+            (channel_id, agent_id, harness, model, system_prompt, working_directory, now, now, int(auto_approve_tools)),
         )
         self.db.commit()
         return AgentChannel(
@@ -195,6 +201,7 @@ class AgentStore:
             model=model, system_prompt=system_prompt,
             status="active", created_at=now, updated_at=now,
             working_directory=working_directory,
+            auto_approve_tools=auto_approve_tools,
         )
 
     def get_channel_by_agent_id(self, agent_id: str) -> AgentChannel | None:
@@ -442,6 +449,7 @@ class AgentStore:
             last_seen_at=row["last_seen_at"] if "last_seen_at" in keys else None,
             effort=row["effort"] if "effort" in keys else "",
             resume_cursor=row["resume_cursor"] if "resume_cursor" in keys else "",
+            auto_approve_tools=bool(row["auto_approve_tools"]) if "auto_approve_tools" in keys else False,
         )
 
     # ----- Interactions -----
@@ -521,6 +529,14 @@ class AgentStore:
         """Update a channel's plan_mode state."""
         self.db.execute(
             "UPDATE agent_channels SET plan_mode = ?, updated_at = ? WHERE id = ?",
+            (int(enabled), now_iso(), channel_id),
+        )
+        self.db.commit()
+
+    def update_auto_approve_tools(self, channel_id: str, enabled: bool) -> None:
+        """Update a channel's auto_approve_tools flag."""
+        self.db.execute(
+            "UPDATE agent_channels SET auto_approve_tools = ?, updated_at = ? WHERE id = ?",
             (int(enabled), now_iso(), channel_id),
         )
         self.db.commit()

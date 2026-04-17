@@ -91,6 +91,7 @@ class WrapperConfig:
     chat_instructions: str
     chat_history: list[dict[str, Any]]
     activity_history: list[dict[str, Any]]
+    auto_approve_tools: bool = False
 
 
 # Callback types.
@@ -231,6 +232,7 @@ class AgentWrapper:
             chat_instructions=payload.get("chat_instructions", ""),
             chat_history=payload.get("history", {}).get("chat", []),
             activity_history=payload.get("history", {}).get("activity", []),
+            auto_approve_tools=bool(payload.get("auto_approve_tools", False)),
         )
 
         self._connected.set()

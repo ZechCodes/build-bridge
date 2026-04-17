@@ -589,12 +589,76 @@ def _read_plan_file(tool_input: dict) -> str:
     return "The agent has finished designing a plan and is requesting approval."
 
 
-def make_can_use_tool(wrapper: AgentWrapper):
-    """Create a can_use_tool callback for ExitPlanMode/EnterPlanMode approval.
+# Tools that require user approval when the channel's auto_approve_tools
+# flag is OFF. Read-side tools (Read/Grep/Glob) and local-state tools
+# (TodoWrite) are auto-allowed to avoid prompt-fatigue on every step.
+_APPROVAL_REQUIRED_TOOLS = frozenset({
+    "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit",
+    "Task", "WebFetch",
+})
 
-    The CLI dispatches ExitPlanMode through can_use_tool — NOT through
-    PreToolUse hooks. This callback handles plan approval via the interaction
-    system and auto-allows everything else.
+
+def _tool_approval_signature(tool_name: str, tool_input: dict) -> str:
+    """Stable signature for "Approve for session" allowlist entries."""
+    if tool_name == "Bash":
+        return f"Bash:{tool_input.get('command', '')}"
+    if tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+        return f"{tool_name}:{tool_input.get('file_path') or tool_input.get('notebook_path', '')}"
+    if tool_name == "WebFetch":
+        return f"WebFetch:{tool_input.get('url', '')}"
+    if tool_name == "Task":
+        return f"Task:{tool_input.get('subagent_type', '')}"
+    # Fallback: tool name only — approve-for-session silences this tool
+    # entirely for the session regardless of arguments.
+    return f"{tool_name}:*"
+
+
+def _format_tool_preview(tool_name: str, tool_input: dict) -> str:
+    """Render a human-readable approval prompt for a tool call."""
+    if tool_name == "Bash":
+        cmd = tool_input.get("command", "")
+        desc = tool_input.get("description", "")
+        parts = [f"**Run `Bash`?**"]
+        if desc:
+            parts.append(desc)
+        if cmd:
+            parts.append(f"```\n{cmd}\n```")
+        return "\n\n".join(parts)
+
+    if tool_name in ("Edit", "Write", "MultiEdit"):
+        path = tool_input.get("file_path", "")
+        parts = [f"**Run `{tool_name}` on `{path}`?**"]
+        old = tool_input.get("old_string") or ""
+        new = tool_input.get("new_string") or tool_input.get("content") or ""
+        if new and not old:
+            parts.append(f"New content:\n```\n{new[:500]}\n```")
+        elif old or new:
+            parts.append(f"```diff\n- {old[:200]}\n+ {new[:200]}\n```")
+        return "\n\n".join(parts)
+
+    if tool_name == "WebFetch":
+        return f"**Fetch URL with `WebFetch`?**\n\n`{tool_input.get('url', '')}`"
+
+    if tool_name == "Task":
+        sub = tool_input.get("subagent_type", "")
+        desc = tool_input.get("description", "")
+        return f"**Spawn `{sub}` subagent?**\n\n{desc}"
+
+    preview = json.dumps(tool_input, default=str)[:300]
+    return f"**Run `{tool_name}`?**\n\n```json\n{preview}\n```"
+
+
+def make_can_use_tool(
+    wrapper: AgentWrapper,
+    *,
+    session_approved: set[str],
+    auto_approve_tools: bool,
+):
+    """Create a can_use_tool callback for plan approval and per-tool prompts.
+
+    Plan approval always prompts (ExitPlanMode). General tool approvals are
+    governed by the channel's auto_approve_tools flag and the session
+    allowlist.
     """
 
     async def callback(
@@ -606,31 +670,62 @@ def make_can_use_tool(wrapper: AgentWrapper):
             await wrapper.emit_state_update(plan_mode=True)
             return PermissionResultAllow()
 
-        if tool_name != "ExitPlanMode":
+        if tool_name == "ExitPlanMode":
+            log.info("Intercepted ExitPlanMode (can_use_tool)")
+            await wrapper.emit_state_update(plan_mode=False)
+
+            plan_content = _read_plan_file(tool_input)
+            result = await wrapper.request_interaction(
+                interaction_id=f"int_{uuid.uuid4().hex[:16]}",
+                question="Review and approve the plan?",
+                kind="plan_review",
+                options=[
+                    {"id": "approve", "label": "Approve"},
+                    {"id": "reject", "label": "Reject"},
+                ],
+                allow_freeform=True,
+                plan=plan_content,
+            )
+            if result.get("selected_option") == "approve":
+                return PermissionResultAllow()
+            reason = result.get("freeform_response") or "User rejected the plan."
+            return PermissionResultDeny(message=reason)
+
+        # Channel auto-approve: let everything through.
+        if auto_approve_tools:
             return PermissionResultAllow()
 
-        log.info("Intercepted ExitPlanMode (can_use_tool)")
-        await wrapper.emit_state_update(plan_mode=False)
+        # Our own MCP bridge is trusted — no user confirmation needed.
+        if tool_name.startswith("mcp__build_chat__"):
+            return PermissionResultAllow()
 
-        plan_content = _read_plan_file(tool_input)
+        # Non-mutating tools don't need per-call approval.
+        if tool_name not in _APPROVAL_REQUIRED_TOOLS:
+            return PermissionResultAllow()
 
+        sig = _tool_approval_signature(tool_name, tool_input)
+        if sig in session_approved:
+            return PermissionResultAllow()
+
+        question = _format_tool_preview(tool_name, tool_input)
         result = await wrapper.request_interaction(
             interaction_id=f"int_{uuid.uuid4().hex[:16]}",
-            question="Review and approve the plan?",
-            kind="plan_review",
+            question=question,
+            kind="approval",
             options=[
-                {"id": "approve", "label": "Approve"},
-                {"id": "reject", "label": "Reject"},
+                {"id": "accept", "label": "Approve"},
+                {"id": "acceptForSession", "label": "Approve for session"},
+                {"id": "decline", "label": "Reject"},
             ],
-            allow_freeform=True,
-            plan=plan_content,
+            allow_freeform=False,
         )
-
-        if result.get("selected_option") == "approve":
+        selected = result.get("selected_option")
+        if selected == "acceptForSession":
+            session_approved.add(sig)
             return PermissionResultAllow()
-
-        reason = result.get("freeform_response") or "User rejected the plan."
-        return PermissionResultDeny(message=reason)
+        if selected == "accept":
+            return PermissionResultAllow()
+        return PermissionResultDeny(message="User rejected tool call.")
 
     return callback
 
@@ -640,6 +735,8 @@ def build_agent_options(
     system_prompt_append: str = "",
     effort: str | None = None,
     resume: str | None = None,
+    auto_approve_tools: bool = False,
+    session_approved: set[str] | None = None,
 ) -> ClaudeAgentOptions:
     """Build ClaudeAgentOptions with BAP hooks and Chat MCP tools.
 
@@ -647,6 +744,10 @@ def build_agent_options(
     Claude Code system prompt via the ``preset`` mechanism so that chat
     instructions and session history appear in the system prompt rather
     than in a user message.
+
+    When *auto_approve_tools* is True the SDK runs in
+    ``bypassPermissions`` mode — the CLI never asks for tool approvals.
+    The ``can_use_tool`` callback still runs for plan review.
     """
     tools = make_chat_tools(wrapper)
     mcp_server = create_sdk_mcp_server("build_chat", tools=tools)
@@ -657,10 +758,17 @@ def build_agent_options(
         else None
     )
 
+    if session_approved is None:
+        session_approved = set()
+
     options = ClaudeAgentOptions(
         setting_sources=["project"],
-        permission_mode="default",
-        can_use_tool=make_can_use_tool(wrapper),
+        permission_mode="bypassPermissions" if auto_approve_tools else "default",
+        can_use_tool=make_can_use_tool(
+            wrapper,
+            session_approved=session_approved,
+            auto_approve_tools=auto_approve_tools,
+        ),
         mcp_servers={"build_chat": mcp_server},
         hooks={
             "PreToolUse": [HookMatcher(hooks=[make_pre_tool_hook(wrapper)])],
@@ -723,6 +831,7 @@ async def run_agent(
     working_directory: str | None = None,
     effort: str | None = None,
     resume_session: str | None = None,
+    auto_approve_tools: bool = False,
 ) -> None:
     """Main agent loop — connects to device client and runs Claude Code."""
 
@@ -763,6 +872,14 @@ async def run_agent(
         return
 
     log.info("Connected to channel %s", config.channel_id)
+
+    # DB-backed channel setting wins over the CLI arg.
+    effective_auto_approve = bool(
+        getattr(config, "auto_approve_tools", False) or auto_approve_tools
+    )
+    # Shared across outer-loop iterations so "Approve for session" is
+    # sticky for the lifetime of this agent process.
+    session_approved: set[str] = set()
 
     # Build chat_instructions into the system context.
     chat_context = CHAT_CONTEXT
@@ -878,6 +995,8 @@ async def run_agent(
                 system_prompt_append=system_append,
                 effort=current_effort,
                 resume=last_session_id,
+                auto_approve_tools=effective_auto_approve,
+                session_approved=session_approved,
             )
 
             try:
@@ -1101,6 +1220,8 @@ def main() -> None:
                         help="Thinking effort level (low, medium, high, xhigh, max)")
     parser.add_argument("--resume-session", default=None,
                         help="Session ID to resume from a previous session")
+    parser.add_argument("--auto-approve-tools", action="store_true",
+                        help="Skip user approval for tool calls (channel setting)")
     args = parser.parse_args()
 
     initial_prompt = " ".join(args.prompt) if args.prompt else None
@@ -1114,6 +1235,7 @@ def main() -> None:
         working_directory=args.working_directory,
         effort=args.effort,
         resume_session=args.resume_session,
+        auto_approve_tools=args.auto_approve_tools,
     ))
 
 

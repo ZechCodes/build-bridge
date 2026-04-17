@@ -52,6 +52,7 @@ class WorkerInfo:
     system_prompt: str
     working_directory: str
     effort: str = ""
+    auto_approve_tools: bool = False
     pid: int | None = None
     process: asyncio.subprocess.Process | None = None
 
@@ -101,6 +102,7 @@ class AgentSpawner:
         system_prompt: str = "",
         working_directory: str = "",
         effort: str = "",
+        auto_approve_tools: bool = False,
     ) -> WorkerInfo:
         """Spawn a build-agent process for a channel.
 
@@ -125,6 +127,7 @@ class AgentSpawner:
                 model=model,
                 system_prompt=system_prompt,
                 working_directory=working_directory,
+                auto_approve_tools=auto_approve_tools,
             )
         else:
             # Update existing channel with new agent_id.
@@ -152,6 +155,14 @@ class AgentSpawner:
         effective_effort = effort or (channel.effort if channel else "")
         if effective_effort:
             cmd.extend(["--effort", effective_effort])
+
+        # Resolve auto_approve_tools: spawn-time arg wins on fresh create;
+        # DB value wins on re-spawn of existing channels (respects user edits).
+        effective_auto_approve = (
+            auto_approve_tools if not existing else (channel.auto_approve_tools if channel else False)
+        )
+        if effective_auto_approve:
+            cmd.append("--auto-approve-tools")
 
         # Pass resume cursor if available (not cleared by reset).
         resume_cursor = channel.resume_cursor if channel else ""
@@ -201,6 +212,7 @@ class AgentSpawner:
             system_prompt=system_prompt,
             working_directory=working_directory,
             effort=effective_effort,
+            auto_approve_tools=effective_auto_approve,
             pid=process.pid,
             process=process,
         )

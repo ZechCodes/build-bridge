@@ -244,6 +244,7 @@ class CodexHarnessRuntime:
         working_directory: str,
         effort: str = "",
         resume_thread_id: str | None = None,
+        auto_approve_tools: bool = False,
     ) -> None:
         self.wrapper = wrapper
         self.client = client
@@ -253,6 +254,12 @@ class CodexHarnessRuntime:
         self.initial_prompt = initial_prompt
         self.working_directory = working_directory
         self.resume_thread_id = resume_thread_id
+        # Prefer the wrapper's configured value (DB-backed, authoritative).
+        # Fall back to the CLI arg for the first fraction of a second before
+        # wrapper.connect() returns.
+        self.auto_approve_tools: bool = bool(
+            getattr(config, "auto_approve_tools", False) or auto_approve_tools
+        )
         self.thread_id: str | None = None
         self.turn_id: str | None = None
         self.plan_mode = False
@@ -266,6 +273,10 @@ class CodexHarnessRuntime:
         self._unread_notified = False
         self._last_quota_error_ts = 0.0
         self._hang_detected = False
+        # Signatures of (tool_name, command-or-path) that the user has
+        # approved "for session" — repeat requests within the same agent
+        # lifetime auto-accept without prompting again.
+        self._session_approved: set[str] = set()
 
     async def run(self) -> None:
         self._register_handlers()
@@ -297,7 +308,7 @@ class CodexHarnessRuntime:
             thread_params: dict[str, Any] = {
                 "cwd": self.working_directory,
                 "model": self.model,
-                "approvalPolicy": "on-request",
+                "approvalPolicy": "never" if self.auto_approve_tools else "on-request",
                 "approvalsReviewer": "user",
                 "sandbox": "workspace-write",
                 "baseInstructions": self.config.system_prompt or None,
@@ -460,7 +471,7 @@ class CodexHarnessRuntime:
             "threadId": self.thread_id,
             "input": _codex_input(text),
             "cwd": self.working_directory,
-            "approvalPolicy": "on-request",
+            "approvalPolicy": "never" if self.auto_approve_tools else "on-request",
             "approvalsReviewer": "user",
             "sandboxPolicy": {
                 "type": "workspaceWrite",
@@ -767,6 +778,17 @@ class CodexHarnessRuntime:
     async def _on_command_approval(self, _request_id: str | int, params: dict[str, Any]) -> dict[str, Any]:
         log.info("Command approval params: %s", json.dumps(params, default=str)[:500])
         command = params.get("command") or ""
+
+        # Channel is in auto-approve mode — rubber-stamp everything.
+        if self.auto_approve_tools:
+            return {"decision": "accept"}
+
+        # Session allowlist: user already said "Always Approve" for this
+        # command during this agent's lifetime.
+        sig = f"cmd:{command}"
+        if sig in self._session_approved:
+            return {"decision": "accept"}
+
         reason = params.get("reason") or ""
         cwd = params.get("cwd") or ""
         parts = ["**Run command?**"]
@@ -783,17 +805,30 @@ class CodexHarnessRuntime:
             kind="approval",
             options=[
                 {"id": "accept", "label": "Approve"},
-                {"id": "acceptForSession", "label": "Always Approve"},
+                {"id": "acceptForSession", "label": "Approve for session"},
                 {"id": "decline", "label": "Reject"},
             ],
             allow_freeform=False,
         )
-        return {"decision": result.get("selected_option") or "decline"}
+        selected = result.get("selected_option") or "decline"
+        if selected == "acceptForSession":
+            self._session_approved.add(sig)
+        return {"decision": selected}
 
     async def _on_file_change_approval(self, _request_id: str | int, params: dict[str, Any]) -> dict[str, Any]:
         log.info("File change approval params: %s", json.dumps(params, default=str)[:1000])
-        reason = params.get("reason") or ""
         changes = params.get("changes") or []
+
+        if self.auto_approve_tools:
+            return {"decision": "accept"}
+
+        # Session allowlist — key on the set of file paths being changed.
+        paths = sorted({(c.get("filePath") or c.get("path") or "") for c in changes if c.get("filePath") or c.get("path")})
+        sig = f"file:{','.join(paths)}"
+        if sig and sig in self._session_approved:
+            return {"decision": "accept"}
+
+        reason = params.get("reason") or ""
         parts = ["**Approve file changes?**"]
         if reason:
             parts.append(reason)
@@ -812,15 +847,28 @@ class CodexHarnessRuntime:
             kind="approval",
             options=[
                 {"id": "accept", "label": "Approve"},
-                {"id": "acceptForSession", "label": "Always Approve"},
+                {"id": "acceptForSession", "label": "Approve for session"},
                 {"id": "decline", "label": "Reject"},
             ],
             allow_freeform=False,
         )
-        return {"decision": result.get("selected_option") or "decline"}
+        selected = result.get("selected_option") or "decline"
+        if selected == "acceptForSession" and sig:
+            self._session_approved.add(sig)
+        return {"decision": selected}
 
     async def _on_permissions_approval(self, _request_id: str | int, params: dict[str, Any]) -> dict[str, Any]:
         log.info("Permissions approval params: %s", json.dumps(params, default=str)[:500])
+
+        if self.auto_approve_tools:
+            return {"permissions": params.get("permissions", {}), "scope": "session"}
+
+        # Session allowlist — key on the set of permission names requested.
+        perm_keys = sorted((params.get("permissions") or {}).keys())
+        sig = f"perm:{','.join(perm_keys)}" if perm_keys else ""
+        if sig and sig in self._session_approved:
+            return {"permissions": params.get("permissions", {}), "scope": "session"}
+
         question = params.get("reason") or "Approve requested permissions?"
         result = await self.wrapper.request_interaction(
             interaction_id=f"int_{uuid.uuid4().hex[:16]}",
@@ -828,11 +876,15 @@ class CodexHarnessRuntime:
             kind="approval",
             options=[
                 {"id": "accept", "label": "Approve"},
+                {"id": "acceptForSession", "label": "Approve for session"},
                 {"id": "decline", "label": "Reject"},
             ],
             allow_freeform=False,
         )
-        if result.get("selected_option") == "accept":
+        selected = result.get("selected_option")
+        if selected in ("accept", "acceptForSession"):
+            if selected == "acceptForSession" and sig:
+                self._session_approved.add(sig)
             return {"permissions": params.get("permissions", {}), "scope": "session"}
         return {"permissions": {"network": None, "fileSystem": None}, "scope": "turn"}
 
@@ -857,24 +909,62 @@ class CodexHarnessRuntime:
     async def _on_mcp_elicitation(self, _request_id: str | int, params: dict[str, Any]) -> dict[str, Any]:
         meta = params.get("_meta") or {}
         server_name = params.get("serverName", "")
+        approval_kind = meta.get("codex_approval_kind")
+        persist_options = meta.get("persist") or []
 
-        # Codex CLI's new mcp_tool_call approval flow routes through elicitation.
-        # Our build-chat bridge is an internal MCP server — Codex calling its
-        # tools (send/read_unread) doesn't need user confirmation; it's noise.
-        if (
-            server_name == CHAT_SERVER_NAME
-            and meta.get("codex_approval_kind") == "mcp_tool_call"
-        ):
-            persist_options = meta.get("persist") or []
+        def _accept_with_persist() -> dict[str, Any]:
             persist = "always" if "always" in persist_options else ("session" if "session" in persist_options else None)
-            log.info(
-                "Auto-approving mcp_tool_call on %s (persist=%s)", server_name, persist,
-            )
             content: dict[str, Any] = {}
             if persist:
                 content["persist"] = persist
             return {"action": "accept", "content": content, "_meta": meta}
 
+        # Codex CLI's new mcp_tool_call approval flow routes through elicitation.
+        # Our build-chat bridge is an internal MCP server — always auto-approve
+        # its tool calls regardless of channel flag (it's our own server and
+        # needs no user confirmation).
+        if server_name == CHAT_SERVER_NAME and approval_kind == "mcp_tool_call":
+            log.info("Auto-approving build-chat mcp_tool_call")
+            return _accept_with_persist()
+
+        # Third-party MCP tool calls follow the channel flag.
+        if approval_kind == "mcp_tool_call":
+            if self.auto_approve_tools:
+                return _accept_with_persist()
+            tool_params = meta.get("tool_params") or {}
+            tool_name = meta.get("tool_name") or tool_params.get("tool") or ""
+            sig = f"mcp:{server_name}:{tool_name}"
+            if sig in self._session_approved:
+                return _accept_with_persist()
+            tool_desc = meta.get("tool_description") or ""
+            display_params = meta.get("tool_params_display") or []
+            parts = [f"**Allow MCP server `{server_name}` to run tool `{tool_name}`?**"]
+            if tool_desc:
+                parts.append(tool_desc)
+            for p in display_params[:10]:
+                parts.append(f"`{p.get('display_name') or p.get('name')}`: {p.get('value')}")
+            question = "\n\n".join(parts)
+            result = await self.wrapper.request_interaction(
+                interaction_id=f"int_{uuid.uuid4().hex[:16]}",
+                question=question,
+                kind="approval",
+                options=[
+                    {"id": "accept", "label": "Approve"},
+                    {"id": "acceptForSession", "label": "Approve for session"},
+                    {"id": "decline", "label": "Reject"},
+                ],
+                allow_freeform=False,
+            )
+            selected = result.get("selected_option")
+            if selected == "acceptForSession":
+                self._session_approved.add(sig)
+                return _accept_with_persist()
+            if selected == "accept":
+                return _accept_with_persist()
+            return {"action": "decline", "content": None, "_meta": meta}
+
+        # Non-tool-call elicitations (real user input forms) — always route
+        # to the user regardless of auto-approve.
         message = params.get("message", "MCP server is requesting input.")
         result = await self.wrapper.request_interaction(
             interaction_id=f"int_{uuid.uuid4().hex[:16]}",
@@ -907,6 +997,7 @@ async def run_agent(
     working_directory: str | None = None,
     effort: str = "",
     resume_session: str | None = None,
+    auto_approve_tools: bool = False,
 ) -> None:
     workdir = working_directory or os.getcwd()
     if os.path.isdir(workdir):
@@ -974,6 +1065,7 @@ async def run_agent(
             working_directory=workdir,
             effort=effort,
             resume_thread_id=resume_session,
+            auto_approve_tools=auto_approve_tools,
         )
         _runtime_ref[0] = runtime
 
@@ -1027,6 +1119,8 @@ def main() -> None:
     parser.add_argument("--effort", default=os.environ.get("BUILD_AGENT_EFFORT", ""))
     parser.add_argument("--resume-session", default=None,
                         help="Thread ID to resume from a previous session")
+    parser.add_argument("--auto-approve-tools", action="store_true",
+                        help="Skip user approval for tool calls (channel setting)")
     args = parser.parse_args()
 
     initial_prompt = " ".join(args.prompt) if args.prompt else None
@@ -1039,6 +1133,7 @@ def main() -> None:
         working_directory=args.working_directory,
         effort=args.effort or "",
         resume_session=args.resume_session,
+        auto_approve_tools=args.auto_approve_tools,
     ))
 
 

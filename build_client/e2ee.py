@@ -323,6 +323,7 @@ class E2EEHandler:
                     entry["working_directory"] = agent_ch.working_directory
                     entry["effort"] = agent_ch.effort
                     entry["plan_mode"] = agent_ch.plan_mode
+                    entry["auto_approve_tools"] = agent_ch.auto_approve_tools
                     entry["last_seen_at"] = agent_ch.last_seen_at
             channel_list.append(entry)
         await self._send_frame(
@@ -379,12 +380,13 @@ class E2EEHandler:
             effort = payload.get("effort", "")
             system_prompt = payload.get("system_prompt", "")
             working_directory = payload.get("working_directory", "")
+            auto_approve_tools = bool(payload.get("auto_approve_tools", False))
 
             log.info(
                 "create_channel payload: harness=%r, model=%r, effort=%r, "
-                "system_prompt=%r, working_directory=%r, all_keys=%s",
+                "system_prompt=%r, working_directory=%r, auto_approve_tools=%r, all_keys=%s",
                 harness, model, effort, system_prompt, working_directory,
-                list(payload.keys()),
+                auto_approve_tools, list(payload.keys()),
             )
 
             harness_info = get_harness(harness)
@@ -399,6 +401,7 @@ class E2EEHandler:
                         effort=effort,
                         system_prompt=system_prompt,
                         working_directory=working_directory,
+                        auto_approve_tools=auto_approve_tools,
                     )
                     response["agent"] = {
                         "agent_id": worker.agent_id,
@@ -469,6 +472,19 @@ class E2EEHandler:
             self._agent_server.store.update_effort(channel_id, effort)
             log.info("Updated effort for channel %s to %s", channel_id[:8], effort)
 
+        auto_approve_changed = False
+        auto_approve_tools = payload.get("auto_approve_tools")
+        if auto_approve_tools is not None and self._agent_server:
+            flag = bool(auto_approve_tools)
+            current = self._agent_server.store.get_channel(channel_id)
+            if current is not None and current.auto_approve_tools != flag:
+                self._agent_server.store.update_auto_approve_tools(channel_id, flag)
+                auto_approve_changed = True
+                log.info(
+                    "Updated auto_approve_tools for channel %s to %s",
+                    channel_id[:8], flag,
+                )
+
         await self._send_frame(
             session, ws,
             payload={
@@ -477,6 +493,7 @@ class E2EEHandler:
                 "working_directory": working_directory,
                 "model": model,
                 "effort": effort,
+                "auto_approve_tools": auto_approve_tools,
             },
         )
 
@@ -486,10 +503,24 @@ class E2EEHandler:
             changes.append(f"Model → {model}")
         if effort is not None:
             changes.append(f"Effort → {effort or 'default'}")
+        if auto_approve_changed:
+            changes.append(
+                "Auto-approve tools → on" if auto_approve_tools else "Auto-approve tools → off"
+            )
         if changes:
             await self._send_system_message(
                 session, ws, channel_id, " · ".join(changes),
             )
+
+        # Restart the agent so the new auto_approve_tools setting takes
+        # effect — the flag is read once at spawn time (both for
+        # approvalPolicy on Codex and permission_mode on Claude), so a
+        # live change requires a fresh process.
+        if auto_approve_changed and self._agent_spawner:
+            try:
+                await self._agent_spawner.restart(channel_id)
+            except Exception:
+                log.exception("Failed to restart agent after auto_approve_tools change")
 
     async def _delete_channel(
         self,

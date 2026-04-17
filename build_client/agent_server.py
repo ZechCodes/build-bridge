@@ -512,6 +512,7 @@ class AgentServer:
                     "reply. Do not output user-facing text directly — always use the send tool."
                 ),
                 "working_directory": channel.working_directory or "",
+                "auto_approve_tools": bool(channel.auto_approve_tools),
                 "history": {
                     "chat": chat_history,
                     "activity": activity_history,
