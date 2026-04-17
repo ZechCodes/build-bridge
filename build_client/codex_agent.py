@@ -531,6 +531,7 @@ class CodexHarnessRuntime:
                     "Codex subprocess hung: no activity for %.1fs during turn %s. Exiting for auto-restart.",
                     idle, self.turn_id,
                 )
+                self._dump_hang_snapshot(idle)
                 self._hang_detected = True
                 try:
                     await self.client.stop()
@@ -543,6 +544,36 @@ class CodexHarnessRuntime:
                 except Exception:
                     log.debug("Failed to emit hang notice", exc_info=True)
                 os._exit(1)
+
+    def _dump_hang_snapshot(self, idle: float) -> None:
+        """Dump runtime + recent message state when a hang is detected."""
+        try:
+            pending = self.client.pending_requests()
+        except Exception:
+            pending = []
+        log.error(
+            "Hang snapshot: thread_id=%s turn_id=%s idle=%.1fs pending_requests=%s model=%s plan_mode=%s",
+            self.thread_id, self.turn_id, idle, pending, self.model, self.plan_mode,
+        )
+        try:
+            recent = self.client.recent_messages()
+        except Exception:
+            log.exception("Failed to collect recent messages")
+            return
+        if not recent:
+            log.error("Hang snapshot: ring buffer empty")
+            return
+        now = time.monotonic()
+        log.error("Hang snapshot: last %d app-server messages (newest first):", len(recent))
+        for ts, message in reversed(recent[-30:]):
+            age = now - ts
+            try:
+                method = message.get("method") or "(response)"
+                params = message.get("params") or {}
+                blob = json.dumps(params, default=str)[:500]
+                log.error("  -%.1fs method=%s id=%s params=%s", age, method, message.get("id"), blob)
+            except Exception:
+                log.error("  -%.1fs raw=%r", age, message)
 
     async def _on_turn_started(self, params: dict[str, Any]) -> None:
         turn = params.get("turn", {})

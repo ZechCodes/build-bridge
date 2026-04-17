@@ -5,10 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+MESSAGE_RING_SIZE = 100
 
 NotificationHandler = Callable[[dict[str, Any]], Awaitable[None] | None]
 RequestHandler = Callable[[str | int, dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]]
@@ -39,6 +43,15 @@ class CodexAppServerClient:
         self._requests: dict[str, RequestHandler] = {}
         self._next_id = 1
         self._write_lock = asyncio.Lock()
+        # Ring buffer of recent raw messages (timestamped) for hang diagnostics.
+        self._recent_messages: deque[tuple[float, dict[str, Any]]] = deque(maxlen=MESSAGE_RING_SIZE)
+
+    def recent_messages(self) -> list[tuple[float, dict[str, Any]]]:
+        """Snapshot of the message ring buffer for diagnostics."""
+        return list(self._recent_messages)
+
+    def pending_requests(self) -> list[int]:
+        return [req_id for req_id, fut in self._pending.items() if not fut.done()]
 
     @property
     def is_running(self) -> bool:
@@ -184,7 +197,8 @@ class CodexAppServerClient:
                         log.debug("Ignoring non-JSON app-server stdout line: %s", line[:200])
                         continue
 
-                    log.info("App-server message: id=%s method=%s", message.get("id"), message.get("method", "(response)"))
+                    self._recent_messages.append((time.monotonic(), message))
+                    log.info("App-server msg: %s", _summarize_message(message))
                     await self._handle_message(message)
         except Exception:
             log.exception("Codex app-server stdout reader crashed")
@@ -272,3 +286,68 @@ class CodexAppServerClient:
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(exc)
+
+
+# Methods whose summaries drop the params blob because they fire every few ms
+# during a turn (deltas) — we still record them in the ring buffer with full
+# payload, but keep the log line compact.
+_HIGH_VOLUME_METHODS = frozenset({
+    "item/agentMessage/delta",
+    "item/reasoning/textDelta",
+    "item/reasoning/summaryTextDelta",
+    "item/plan/delta",
+    "item/commandExecution/outputDelta",
+    "item/fileChange/outputDelta",
+})
+
+
+def _summarize_message(message: dict[str, Any]) -> str:
+    """Compact one-line summary of an app-server message for logging."""
+    method = message.get("method")
+    msg_id = message.get("id")
+    if method is None:
+        return f"response id={msg_id}"
+
+    if method in _HIGH_VOLUME_METHODS:
+        delta = message.get("params", {}).get("delta", "")
+        return f"{method} len={len(delta)}"
+
+    params = message.get("params") or {}
+    extras: list[str] = []
+
+    item = params.get("item")
+    if isinstance(item, dict):
+        extras.append(f"item.type={item.get('type')!r}")
+        extras.append(f"item.id={item.get('id')!r}")
+        cmd = item.get("command") or item.get("commandExecution")
+        if isinstance(cmd, dict) and cmd.get("command"):
+            extras.append(f"cmd={str(cmd.get('command'))[:80]!r}")
+        tool = item.get("tool") or item.get("toolCall")
+        if isinstance(tool, dict) and tool.get("name"):
+            extras.append(f"tool={tool.get('name')!r}")
+
+    turn = params.get("turn")
+    if isinstance(turn, dict):
+        extras.append(f"turn.id={turn.get('id')!r}")
+        if turn.get("status"):
+            extras.append(f"turn.status={turn.get('status')!r}")
+
+    if method == "error":
+        err = params.get("error", params)
+        err_msg = err.get("message") if isinstance(err, dict) else err
+        extras.append(f"error={str(err_msg)[:200]!r}")
+
+    if method == "thread/status/changed":
+        extras.append(f"status={params.get('status')!r}")
+
+    if method == "account/rateLimits/updated":
+        rate = params.get("rateLimits", {})
+        for key in ("primary", "secondary"):
+            window = rate.get(key)
+            if window:
+                extras.append(f"{key}.usedPct={window.get('usedPercent')}")
+
+    tail = " ".join(extras)
+    if msg_id is not None:
+        return f"{method} id={msg_id} {tail}".strip()
+    return f"{method} {tail}".strip()
