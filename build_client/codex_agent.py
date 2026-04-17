@@ -716,17 +716,21 @@ class CodexHarnessRuntime:
         # if we don't read it here we lose the reply entirely. Surface it
         # to the chat when the model didn't use the send tool this turn.
         if item.get("type") == "agentMessage":
-            if not self._turn_used_send:
-                text = _text_from_agent_message(item)
-                if text.strip():
-                    log.info(
-                        "Surfacing agentMessage fallback (%d chars) — no send call this turn",
-                        len(text),
-                    )
-                    try:
-                        await self.wrapper.chat_mcp.handle_send(text)
-                    except Exception:
-                        log.exception("Failed to surface agentMessage fallback")
+            text = _text_from_agent_message(item)
+            log.info(
+                "agentMessage completed: used_send=%s text_len=%d keys=%s raw=%s",
+                self._turn_used_send, len(text), list(item.keys()),
+                json.dumps(item, default=str)[:600],
+            )
+            if not self._turn_used_send and text.strip():
+                log.info(
+                    "Surfacing agentMessage fallback (%d chars) — no send call this turn",
+                    len(text),
+                )
+                try:
+                    await self.wrapper.chat_mcp.handle_send(text)
+                except Exception:
+                    log.exception("Failed to surface agentMessage fallback")
             return
 
         item_id = item.get("id")

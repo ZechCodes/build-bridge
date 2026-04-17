@@ -238,6 +238,12 @@ class CodexAppServerClient:
             params = message.get("params", {})
             handler = self._notifications.get(method)
             if not handler:
+                # Dump unknown notifications so we notice new protocol
+                # additions instead of silently dropping them.
+                log.warning(
+                    "Unhandled app-server notification: method=%s params=%s",
+                    method, json.dumps(params, default=str)[:2000],
+                )
                 return
             result = handler(params)
             if asyncio.iscoroutine(result):
@@ -262,6 +268,10 @@ class CodexAppServerClient:
         handler = self._requests.get(method)
 
         if not handler:
+            log.warning(
+                "Unhandled app-server request: method=%s id=%s params=%s",
+                method, request_id, json.dumps(params, default=str)[:2000],
+            )
             await self._send_json({
                 "jsonrpc": "2.0",
                 "id": request_id,
