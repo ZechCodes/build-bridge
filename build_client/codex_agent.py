@@ -855,6 +855,26 @@ class CodexHarnessRuntime:
         return {"answers": answers}
 
     async def _on_mcp_elicitation(self, _request_id: str | int, params: dict[str, Any]) -> dict[str, Any]:
+        meta = params.get("_meta") or {}
+        server_name = params.get("serverName", "")
+
+        # Codex CLI's new mcp_tool_call approval flow routes through elicitation.
+        # Our build-chat bridge is an internal MCP server — Codex calling its
+        # tools (send/read_unread) doesn't need user confirmation; it's noise.
+        if (
+            server_name == CHAT_SERVER_NAME
+            and meta.get("codex_approval_kind") == "mcp_tool_call"
+        ):
+            persist_options = meta.get("persist") or []
+            persist = "always" if "always" in persist_options else ("session" if "session" in persist_options else None)
+            log.info(
+                "Auto-approving mcp_tool_call on %s (persist=%s)", server_name, persist,
+            )
+            content: dict[str, Any] = {}
+            if persist:
+                content["persist"] = persist
+            return {"action": "accept", "content": content, "_meta": meta}
+
         message = params.get("message", "MCP server is requesting input.")
         result = await self.wrapper.request_interaction(
             interaction_id=f"int_{uuid.uuid4().hex[:16]}",
@@ -867,15 +887,15 @@ class CodexHarnessRuntime:
             allow_freeform=True,
         )
         if result.get("selected_option") == "accept":
-            content: Any = None
+            content_any: Any = None
             freeform = result.get("freeform_response")
             if freeform:
                 try:
-                    content = json.loads(freeform)
+                    content_any = json.loads(freeform)
                 except json.JSONDecodeError:
-                    content = {"value": freeform}
-            return {"action": "accept", "content": content, "_meta": params.get("_meta")}
-        return {"action": "decline", "content": None, "_meta": params.get("_meta")}
+                    content_any = {"value": freeform}
+            return {"action": "accept", "content": content_any, "_meta": meta}
+        return {"action": "decline", "content": None, "_meta": meta}
 
 
 async def run_agent(
