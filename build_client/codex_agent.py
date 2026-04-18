@@ -335,7 +335,7 @@ class CodexHarnessRuntime:
             thread_params: dict[str, Any] = {
                 "cwd": self.working_directory,
                 "model": self.model,
-                "approvalPolicy": "never" if self.auto_approve_tools else "on-request",
+                "approvalPolicy": "on-request",
                 "approvalsReviewer": "user",
                 "sandbox": "workspace-write",
                 "baseInstructions": self.config.system_prompt or None,
@@ -498,7 +498,7 @@ class CodexHarnessRuntime:
             "threadId": self.thread_id,
             "input": _codex_input(text),
             "cwd": self.working_directory,
-            "approvalPolicy": "never" if self.auto_approve_tools else "on-request",
+            "approvalPolicy": "on-request",
             "approvalsReviewer": "user",
             "sandboxPolicy": {
                 "type": "workspaceWrite",
