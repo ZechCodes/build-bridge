@@ -326,14 +326,21 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
         )
 
         # Inject unread message reminder so agent checks messages promptly.
+        # Must use hookSpecificOutput.additionalContext — top-level
+        # systemMessage is a user-facing warning Claude never sees.
         result: dict = {"continue_": True}
         unread = wrapper.chat_mcp.unread_count
         if unread > 0:
             noun = "message" if unread == 1 else "messages"
-            result["systemMessage"] = (
-                f"You have {unread} unread {noun} from the user. "
-                f"Use the read_unread tool to read it."
-            )
+            result["hookSpecificOutput"] = {
+                "hookEventName": "PreToolUse",
+                "additionalContext": (
+                    f"You have {unread} unread {noun} from the user. "
+                    f"Use the mcp__build_chat__read_unread tool to read "
+                    f"{'it' if unread == 1 else 'them'}, then reply with "
+                    f"mcp__build_chat__send."
+                ),
+            }
         return result
 
     return hook
@@ -490,16 +497,23 @@ def make_post_tool_hook(wrapper: AgentWrapper):
                 tool_name, tool_use_id,
             )
 
-        # Inject unread message reminder via systemMessage so the agent
-        # is aware of pending user messages during long tool chains.
+        # Inject unread message reminder so the agent is aware of pending
+        # user messages during long tool chains. Uses additionalContext
+        # (visible to Claude) — top-level systemMessage is just a user-facing
+        # toast and Claude never sees it.
         unread = wrapper.chat_mcp.unread_count
         if unread > 0:
+            noun = "message" if unread == 1 else "messages"
             return {
-                "systemMessage": (
-                    f"REMINDER: The user cannot see your text responses. "
-                    f"Use mcp__build_chat__send to communicate what you're going "
-                    f"to do and what you've done."
-                ),
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": (
+                        f"You have {unread} unread {noun} from the user. "
+                        f"Use mcp__build_chat__read_unread to read "
+                        f"{'it' if unread == 1 else 'them'}, then reply with "
+                        f"mcp__build_chat__send."
+                    ),
+                },
             }
 
         return {}
