@@ -34,11 +34,11 @@ log = logging.getLogger(__name__)
 
 CHAT_CONTEXT = (
     "IMPORTANT: You are connected to the user through Build's remote chat bridge.\n"
-    "- The user cannot see your raw harness output.\n"
-    "- Use the build-chat MCP server's send tool to communicate with the user. "
-    "Use it while you're working to keep the user looped in on progress, "
-    "important findings, and important decisions.\n"
-    "- Use the build-chat MCP server's read_unread tool when notified about unread user messages.\n"
+    "- The user CANNOT see your raw harness output. Your normal text replies go nowhere.\n"
+    "- The ONLY way to reply to the user is by calling the build-chat MCP server's `send` tool.\n"
+    "- After calling `read_unread` you MUST call `send` at least once before ending the turn — "
+    "even a short acknowledgment. Never end a turn silently.\n"
+    "- Use `send` while you're working to keep the user looped in on progress, important findings, and decisions.\n"
     "- Keep user-visible replies concise and natural.\n"
     "- Treat planning mode instructions from the system as authoritative.\n"
 )
