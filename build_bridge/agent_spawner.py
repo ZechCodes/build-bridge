@@ -8,6 +8,7 @@ the AgentWrapper.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -15,6 +16,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from build_bridge.agent_store import AgentStore
@@ -25,6 +27,34 @@ RESTART_BACKOFF_BASE_S = 1.0
 RESTART_BACKOFF_MAX_S = 30.0
 MAX_RESTART_ATTEMPTS = 5
 RESTART_ATTEMPTS_RESET_AFTER_S = 300.0  # reset counter after 5 min of stability
+
+# How often to poll PID existence for adopted agents (no subprocess handle
+# available across re-exec, so the monitor task can't await process.wait()).
+ADOPTED_POLL_INTERVAL_S = 2.0
+
+# Snapshot path for --keep-agents re-exec. Written by the outgoing daemon
+# just before os.execv and consumed by the fresh process during startup.
+WORKER_SNAPSHOT_PATH = Path.home() / ".config" / "build" / "worker-snapshot.json"
+
+# Env var signalling that the process was re-execed via --keep-agents and
+# should rehydrate workers from the snapshot instead of respawning them.
+KEEP_AGENTS_ENV = "BUILD_KEEP_AGENTS"
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if the process with *pid* is still running.
+
+    Uses ``kill(pid, 0)`` — delivers no signal, just probes for existence.
+    A ``PermissionError`` means the process exists but is owned by someone
+    else (shouldn't happen for our own children, but treated as alive).
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 _HARNESS_MODULES: dict[str, str] = {
@@ -84,11 +114,19 @@ class AgentSpawner:
         return dict(self._workers)
 
     def is_running(self, channel_id: str) -> bool:
-        """Check if an agent is running on a channel."""
+        """Check if an agent is running on a channel.
+
+        For normally-spawned workers this checks the subprocess.Process's
+        returncode. For adopted workers (rehydrated across a ``--keep-agents``
+        re-exec), ``worker.process`` is None and we fall back to probing the
+        PID directly.
+        """
         worker = self._workers.get(channel_id)
-        if not worker or not worker.process:
+        if not worker:
             return False
-        return worker.process.returncode is None
+        if worker.process is not None:
+            return worker.process.returncode is None
+        return bool(worker.pid and _pid_alive(worker.pid))
 
     # -----------------------------------------------------------------
     # Spawn
@@ -261,6 +299,24 @@ class AgentSpawner:
                     await worker.process.wait()
             except ProcessLookupError:
                 pass
+        elif worker.pid and _pid_alive(worker.pid):
+            # Adopted worker — no subprocess.Process handle, signal via PID.
+            log.info("Stopping adopted agent pid=%s on channel %s", worker.pid, channel_id[:8])
+            try:
+                os.kill(worker.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            # Poll up to 5s for exit, then SIGKILL.
+            for _ in range(50):
+                if not _pid_alive(worker.pid):
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                log.warning("Adopted agent pid=%s didn't stop, killing", worker.pid)
+                try:
+                    os.kill(worker.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
         # Update channel status.
         self._store.update_channel_status(channel_id, "idle" if resumable else "closed")
@@ -425,6 +481,112 @@ class AgentSpawner:
             log.exception("Auto-restart failed for channel %s", channel_id[:8])
 
     # -----------------------------------------------------------------
+    # Snapshot / adoption — for --keep-agents across daemon re-exec
+    # -----------------------------------------------------------------
+
+    def snapshot_to_disk(self, path: Path) -> int:
+        """Serialize current workers to *path* so a post-re-exec daemon can
+        re-adopt them. Returns the count written.
+
+        Only the fields needed to rehydrate are persisted. The subprocess
+        handle cannot be preserved across ``os.execv``; the new daemon
+        tracks adopted agents by PID only (see ``rehydrate_from_snapshot``).
+        """
+        data = []
+        for worker in self._workers.values():
+            if not worker.pid:
+                continue
+            data.append({
+                "channel_id": worker.channel_id,
+                "agent_id": worker.agent_id,
+                "harness": worker.harness,
+                "model": worker.model,
+                "system_prompt": worker.system_prompt,
+                "working_directory": worker.working_directory,
+                "effort": worker.effort,
+                "auto_approve_tools": worker.auto_approve_tools,
+                "pid": worker.pid,
+            })
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+        return len(data)
+
+    def rehydrate_from_snapshot(self, path: Path) -> int:
+        """Adopt workers written by a previous daemon's ``snapshot_to_disk``.
+
+        Creates WorkerInfo entries with ``process=None`` (the subprocess
+        handle is gone) and starts a PID-polling monitor task for each.
+        Skips entries whose PID is no longer alive. Deletes the snapshot
+        file on completion so a later crash-restart doesn't re-adopt stale
+        entries. Returns the count adopted.
+        """
+        if not path.exists():
+            return 0
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("Failed to read worker snapshot at %s: %s", path, exc)
+            path.unlink(missing_ok=True)
+            return 0
+
+        adopted = 0
+        for entry in data:
+            pid = entry.get("pid")
+            channel_id = entry.get("channel_id")
+            if not pid or not channel_id:
+                continue
+            if not _pid_alive(pid):
+                log.info(
+                    "Skipping adoption of channel %s: pid %s is no longer alive",
+                    channel_id[:8], pid,
+                )
+                continue
+            worker = WorkerInfo(
+                channel_id=channel_id,
+                agent_id=entry.get("agent_id", ""),
+                harness=entry.get("harness", ""),
+                model=entry.get("model", ""),
+                system_prompt=entry.get("system_prompt", ""),
+                working_directory=entry.get("working_directory", ""),
+                effort=entry.get("effort", ""),
+                auto_approve_tools=entry.get("auto_approve_tools", False),
+                pid=pid,
+                process=None,
+            )
+            self._workers[channel_id] = worker
+            self._monitor_tasks[channel_id] = asyncio.create_task(
+                self._monitor_adopted(worker)
+            )
+            adopted += 1
+            log.info("Adopted agent pid=%s on channel %s", pid, channel_id[:8])
+
+        path.unlink(missing_ok=True)
+        return adopted
+
+    async def _monitor_adopted(self, worker: WorkerInfo) -> None:
+        """Poll PID existence for an adopted worker; clean up when it exits.
+
+        Unlike ``_monitor_worker`` we don't have a subprocess.Process to
+        await, so there's no returncode to inspect. A vanished PID is
+        treated as a graceful exit — the channel goes ``idle`` and the
+        auto-restart backoff is not engaged.
+        """
+        if not worker.pid:
+            return
+        try:
+            while _pid_alive(worker.pid):
+                await asyncio.sleep(ADOPTED_POLL_INTERVAL_S)
+            log.info(
+                "Adopted agent pid=%s on channel %s exited",
+                worker.pid, worker.channel_id[:8],
+            )
+            self._workers.pop(worker.channel_id, None)
+            self._monitor_tasks.pop(worker.channel_id, None)
+            self._store.update_channel_status(worker.channel_id, "idle")
+        except asyncio.CancelledError:
+            pass
+
+    # -----------------------------------------------------------------
     # Status
     # -----------------------------------------------------------------
 
@@ -432,7 +594,7 @@ class AgentSpawner:
         """List all workers with their status."""
         result = []
         for channel_id, worker in self._workers.items():
-            running = worker.process is not None and worker.process.returncode is None
+            running = self.is_running(channel_id)
             result.append({
                 "channel_id": channel_id,
                 "agent_id": worker.agent_id,

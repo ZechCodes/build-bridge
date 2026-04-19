@@ -241,3 +241,80 @@ class TestHarnessRuntimeDispatch:
     def test_known_harness_modules(self):
         assert runtime_module_for_harness("claude-code") == "build_bridge.build_agent"
         assert runtime_module_for_harness("codex") == "build_bridge.codex_agent"
+
+
+class TestSnapshotAndAdopt:
+    """Covers --keep-agents: persist workers across daemon re-exec and
+    re-attach them via PID polling (process handle is lost across execv)."""
+
+    async def test_snapshot_round_trip_adopts_live_pid(self, spawner, store, tmp_path):
+        # Spawn a long-running dummy process we can legitimately own the PID of.
+        # (The real agent runtime requires a running WS server — out of scope here.)
+        proc = await asyncio.create_subprocess_exec(
+            "sleep", "30",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            store.create_channel(
+                channel_id="ch_adopt", agent_id="agt_adopt",
+                harness="claude-code", model="claude-sonnet-4-20250514",
+            )
+            spawner._workers["ch_adopt"] = WorkerInfo(
+                channel_id="ch_adopt", agent_id="agt_adopt",
+                harness="claude-code", model="claude-sonnet-4-20250514",
+                system_prompt="", working_directory="",
+                pid=proc.pid, process=proc,
+            )
+
+            snapshot_path = tmp_path / "snap.json"
+            count = spawner.snapshot_to_disk(snapshot_path)
+            assert count == 1
+            assert snapshot_path.exists()
+
+            # Simulate a fresh daemon process: new spawner reads the snapshot.
+            fresh = AgentSpawner(store=store, agent_port=19999)
+            adopted = fresh.rehydrate_from_snapshot(snapshot_path)
+            assert adopted == 1
+            assert not snapshot_path.exists()  # consumed
+            assert fresh.is_running("ch_adopt")  # alive via kill(pid, 0)
+
+            worker = fresh._workers["ch_adopt"]
+            assert worker.process is None
+            assert worker.pid == proc.pid
+            assert worker.agent_id == "agt_adopt"
+        finally:
+            proc.terminate()
+            await proc.wait()
+            # Cancel any monitor tasks the fresh spawner started.
+            for task in list(fresh._monitor_tasks.values()):
+                task.cancel()
+
+    async def test_rehydrate_skips_dead_pids(self, spawner, store, tmp_path):
+        # A guaranteed-dead PID: spawn a short-lived process, wait for exit.
+        proc = await asyncio.create_subprocess_exec(
+            "true",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        dead_pid = proc.pid
+
+        snapshot_path = tmp_path / "snap.json"
+        import json as _json
+        snapshot_path.write_text(_json.dumps([{
+            "channel_id": "ch_dead", "agent_id": "agt_dead",
+            "harness": "claude-code", "model": "m",
+            "system_prompt": "", "working_directory": "",
+            "effort": "", "auto_approve_tools": False,
+            "pid": dead_pid,
+        }]))
+
+        adopted = spawner.rehydrate_from_snapshot(snapshot_path)
+        assert adopted == 0
+        assert "ch_dead" not in spawner._workers
+        assert not snapshot_path.exists()
+
+    async def test_rehydrate_missing_snapshot_is_noop(self, spawner, tmp_path):
+        adopted = spawner.rehydrate_from_snapshot(tmp_path / "nope.json")
+        assert adopted == 0

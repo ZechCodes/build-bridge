@@ -23,7 +23,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from build_bridge.agent_server import AgentServer, DEFAULT_AGENT_PORT
-from build_bridge.agent_spawner import AgentSpawner
+from build_bridge.agent_spawner import (
+    AgentSpawner,
+    KEEP_AGENTS_ENV,
+    WORKER_SNAPSHOT_PATH,
+)
 from build_bridge.agent_store import AgentStore
 from build_bridge.auth import device_auth_flow
 from build_bridge.complications import ComplicationRegistry
@@ -118,21 +122,30 @@ async def async_main(
         await agent_server.start()
         log.info("Agent server ready on port %s", agent_port)
 
-        # Re-spawn agents for channels that were active/idle before restart.
-        active_channels = agent_store.list_resumable_channels()
-        if active_channels:
-            log.info("Re-spawning agents for %d active channel(s)", len(active_channels))
-            for ch in active_channels:
-                try:
-                    await agent_spawner.spawn(
-                        channel_id=ch.id,
-                        harness=ch.harness,
-                        model=ch.model,
-                        system_prompt=ch.system_prompt,
-                        working_directory=ch.working_directory,
-                    )
-                except Exception as exc:
-                    log.error("Failed to re-spawn agent on channel %s: %s", ch.id[:8], exc)
+        # If the previous daemon exited via `--keep-agents`, adopt the
+        # surviving agent processes from the snapshot instead of spawning
+        # fresh ones. Consume the env var so a subsequent crash-restart
+        # (without --keep-agents) falls back to the normal respawn path.
+        keep_agents_restart = bool(os.environ.pop(KEEP_AGENTS_ENV, None))
+        if keep_agents_restart:
+            adopted = agent_spawner.rehydrate_from_snapshot(WORKER_SNAPSHOT_PATH)
+            log.info("Adopted %d surviving agent(s) after --keep-agents restart", adopted)
+        else:
+            # Re-spawn agents for channels that were active/idle before restart.
+            active_channels = agent_store.list_resumable_channels()
+            if active_channels:
+                log.info("Re-spawning agents for %d active channel(s)", len(active_channels))
+                for ch in active_channels:
+                    try:
+                        await agent_spawner.spawn(
+                            channel_id=ch.id,
+                            harness=ch.harness,
+                            model=ch.model,
+                            system_prompt=ch.system_prompt,
+                            working_directory=ch.working_directory,
+                        )
+                    except Exception as exc:
+                        log.error("Failed to re-spawn agent on channel %s: %s", ch.id[:8], exc)
 
         # Run the relay connection. If running under the daemon, make it
         # interruptible via the shutdown event.
@@ -169,7 +182,19 @@ async def async_main(
             await agent_spawner.stop_all(resumable=restarting)
         else:
             log.info("Keeping agents running (--keep-agents)")
-        await agent_server.stop()
+            if restarting:
+                # Persist worker state and flag the re-exec so the next
+                # daemon adopts these processes instead of spawning fresh
+                # ones (which would race the survivors' WS reconnects).
+                count = agent_spawner.snapshot_to_disk(WORKER_SNAPSHOT_PATH)
+                os.environ[KEEP_AGENTS_ENV] = "1"
+                log.info(
+                    "Snapshotted %d agent(s) for adoption after re-exec", count,
+                )
+        # When keeping agents alive, skip the broadcast of agent.shutdown —
+        # that would tell each agent wrapper to exit cleanly, defeating the
+        # whole point. Agents just see their WS drop and auto-reconnect.
+        await agent_server.stop(notify_agents=not keep_agents)
         agent_store.close()
         store.close()
 

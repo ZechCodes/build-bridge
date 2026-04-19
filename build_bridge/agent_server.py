@@ -110,6 +110,11 @@ class AgentServer:
         self._channel_to_agent: dict[str, str] = {}  # channel_id -> agent_id
         self._compact_futures: dict[str, asyncio.Future[str]] = {}  # channel_id -> pending summary
         self._cancel_ack_events: dict[str, asyncio.Event] = {}  # channel_id -> one-shot event
+        # Tracks the activity_log row id currently receiving streaming text deltas.
+        # Consecutive text deltas UPDATE this row; any non-text event closes the run
+        # so the next text delta starts a fresh row. Mirrors the live UI which
+        # coalesces reasoning deltas until a tool use or other event interrupts.
+        self._active_text_row: dict[str, str] = {}  # channel_id -> activity row id
         self._server: Any = None
         self._serve_task: asyncio.Task | None = None
 
@@ -133,18 +138,24 @@ class AgentServer:
         )
         log.info("Agent server listening on ws://%s:%s/agent", self._host, self._port)
 
-    async def stop(self) -> None:
-        """Gracefully shut down: send agent.shutdown to all agents, close server."""
-        # Send shutdown to all connected agents.
-        for agent in list(self._agents.values()):
-            try:
-                shutdown = make_envelope("agent.shutdown", {"reason": "client_shutdown"})
-                await agent.ws.send(json.dumps(shutdown))
-            except Exception:
-                pass
+    async def stop(self, *, notify_agents: bool = True) -> None:
+        """Shut down the server.
 
-        # Give agents a moment to send agent.goodbye.
-        await asyncio.sleep(0.5)
+        When *notify_agents* is True, each connected agent receives an
+        ``agent.shutdown`` envelope so it exits cleanly. Pass False during a
+        ``--keep-agents`` restart — the agent subprocesses will outlive this
+        daemon and reconnect to its successor.
+        """
+        if notify_agents:
+            for agent in list(self._agents.values()):
+                try:
+                    shutdown = make_envelope("agent.shutdown", {"reason": "client_shutdown"})
+                    await agent.ws.send(json.dumps(shutdown))
+                except Exception:
+                    pass
+
+            # Give agents a moment to send agent.goodbye.
+            await asyncio.sleep(0.5)
 
         if self._server:
             self._server.close()
@@ -608,6 +619,8 @@ class AgentServer:
         payload = data["payload"]
         content = payload.get("content", "")
 
+        self._close_text_run(agent.channel_id)
+
         # If a compact is pending for this channel, intercept the response.
         future = self._compact_futures.get(agent.channel_id)
         if future and not future.done():
@@ -797,13 +810,22 @@ class AgentServer:
         payload = data["payload"]
         delta = payload.get("delta", {})
         index = payload.get("index", 0)
+        delta_type = delta.get("type", "text")
 
-        # Store activity entry.
-        self.store.store_activity(
-            agent.channel_id,
-            delta.get("type", "text"),
-            delta,
-        )
+        # Coalesce consecutive text deltas into a single activity row so history
+        # replay matches the live UI (which merges consecutive reasoning deltas
+        # into one entry). The first text delta inserts a row; subsequent deltas
+        # append to it until _close_text_run is called by a non-text event.
+        if delta_type == "text":
+            active_id = self._active_text_row.get(agent.channel_id)
+            if active_id:
+                self.store.append_text_activity(active_id, delta.get("text", ""))
+            else:
+                entry = self.store.store_activity(agent.channel_id, "text", delta)
+                self._active_text_row[agent.channel_id] = entry.id
+        else:
+            self._close_text_run(agent.channel_id)
+            self.store.store_activity(agent.channel_id, delta_type, delta)
 
         # Notify browser.
         await self._notify_browser(agent.channel_id, {
@@ -834,6 +856,8 @@ class AgentServer:
         payload = data["payload"]
         reason = payload.get("reason", "complete")
         usage = payload.get("usage")
+
+        self._close_text_run(agent.channel_id)
 
         # Signal any pending cancel acknowledgement waiter.
         ack_event = self._cancel_ack_events.get(agent.channel_id)
@@ -868,6 +892,8 @@ class AgentServer:
         tool_use_id = payload.get("tool_use_id", "")
         name = payload.get("name", "")
         tool_input = payload.get("input", {})
+
+        self._close_text_run(agent.channel_id)
 
         # Store tool use.
         record = self.store.store_tool_use(tool_use_id, agent.channel_id, name, tool_input)
@@ -909,6 +935,8 @@ class AgentServer:
         tool_use_id = payload.get("tool_use_id", "")
         content = payload.get("content", "")
         is_error = payload.get("is_error", False)
+
+        self._close_text_run(agent.channel_id)
 
         # Store tool result.
         completed_at = self.store.store_tool_result(tool_use_id, content, is_error)
@@ -979,6 +1007,8 @@ class AgentServer:
         allow_freeform = payload.get("allow_freeform", True)
         plan = payload.get("plan")
         multiselect = payload.get("multiselect", False)
+
+        self._close_text_run(agent.channel_id)
 
         # Persist as a chat message with metadata.
         self.store.store_interaction(
@@ -1055,8 +1085,15 @@ class AgentServer:
     # Helpers
     # -----------------------------------------------------------------
 
+    def _close_text_run(self, channel_id: str) -> None:
+        """End the current coalesced-text activity row so the next text delta
+        starts a fresh row. See ``_handle_activity_delta`` for the rationale.
+        """
+        self._active_text_row.pop(channel_id, None)
+
     def _cleanup_agent(self, agent: AgentConnection) -> None:
         """Remove an agent from tracking and update channel status."""
+        self._close_text_run(agent.channel_id)
         self._agents.pop(agent.agent_id, None)
         self._channel_to_agent.pop(agent.channel_id, None)
 

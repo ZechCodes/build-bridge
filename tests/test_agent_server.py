@@ -211,6 +211,66 @@ class TestActivity:
                 for b in broadcast_log
             )
 
+    async def test_consecutive_text_deltas_coalesce_into_one_row(self, server, store, broadcast_log):
+        srv, port = server
+        async with ws_connect(f"ws://127.0.0.1:{port}") as ws:
+            await ws.send(json.dumps(_hello_envelope()))
+            configured = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            channel_id = configured["payload"]["channel_id"]
+
+            for i, chunk in enumerate(["Think", "ing ", "about ", "the ", "code."]):
+                delta = make_envelope(ACTIVITY_DELTA, {
+                    "delta": {"type": "text", "text": chunk},
+                    "index": i,
+                })
+                await ws.send(json.dumps(delta))
+            await asyncio.sleep(0.15)
+
+            activity = store.get_activity_history(channel_id)
+            assert len(activity) == 1
+            assert activity[0].type == "text"
+            assert json.loads(activity[0].data)["text"] == "Thinking about the code."
+
+            # Every delta still broadcasts live for smooth streaming.
+            delta_broadcasts = [b for b in broadcast_log if b[1]["event_type"] == "activity.delta"]
+            assert len(delta_broadcasts) == 5
+
+    async def test_tool_use_interrupts_text_run(self, server, store, broadcast_log):
+        srv, port = server
+        async with ws_connect(f"ws://127.0.0.1:{port}") as ws:
+            await ws.send(json.dumps(_hello_envelope()))
+            configured = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            channel_id = configured["payload"]["channel_id"]
+
+            await ws.send(json.dumps(make_envelope(ACTIVITY_DELTA, {
+                "delta": {"type": "text", "text": "First "},
+                "index": 0,
+            })))
+            await ws.send(json.dumps(make_envelope(ACTIVITY_DELTA, {
+                "delta": {"type": "text", "text": "block."},
+                "index": 1,
+            })))
+            await ws.send(json.dumps(make_envelope(TOOL_USE, {
+                "tool_use_id": "tu_x",
+                "name": "read_file",
+                "input": {"path": "/a"},
+            })))
+            await ws.send(json.dumps(make_envelope(ACTIVITY_DELTA, {
+                "delta": {"type": "text", "text": "Second "},
+                "index": 2,
+            })))
+            await ws.send(json.dumps(make_envelope(ACTIVITY_DELTA, {
+                "delta": {"type": "text", "text": "block."},
+                "index": 3,
+            })))
+            await asyncio.sleep(0.15)
+
+            activity = store.get_activity_history(channel_id)
+            text_rows = [e for e in activity if e.type == "text"]
+            assert len(text_rows) == 2
+            texts = [json.loads(r.data)["text"] for r in text_rows]
+            assert texts == ["First block.", "Second block."]
+
     async def test_activity_end_updates_status(self, server, store, broadcast_log):
         srv, port = server
         async with ws_connect(f"ws://127.0.0.1:{port}") as ws:

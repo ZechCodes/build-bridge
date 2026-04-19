@@ -355,6 +355,27 @@ class AgentStore:
             type=entry_type, data=data_json, created_at=now,
         )
 
+    def append_text_activity(self, entry_id: str, text: str) -> None:
+        """Append streaming text to an existing `text` activity row's ``data.text``.
+
+        Used to coalesce a run of text deltas into a single row so history
+        replay matches the live UI (which merges consecutive reasoning deltas
+        into one entry until a non-text event interrupts them).
+        """
+        row = self.db.execute(
+            "SELECT data FROM activity_log WHERE id = ?",
+            (entry_id,),
+        ).fetchone()
+        if not row:
+            return
+        data = json.loads(row["data"])
+        data["text"] = data.get("text", "") + text
+        self.db.execute(
+            "UPDATE activity_log SET data = ? WHERE id = ?",
+            (json.dumps(data), entry_id),
+        )
+        self.db.commit()
+
     def get_activity_history(self, channel_id: str, since: str | None = None) -> list[ActivityEntry]:
         """Get activity history for a channel, optionally filtered to entries after `since`."""
         if since:
