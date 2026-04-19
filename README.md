@@ -1,8 +1,16 @@
-# Build Client
+# Build Bridge
 
-Local device client for [Build](https://getbuild.ing). Connects to the Build server over E2E encrypted WebSocket, manages agent processes (Claude Code, Codex CLI), and provides a control CLI for operations.
+Device client for [Build](https://getbuild.ing). Connects to the Build server over E2E encrypted WebSocket, manages agent processes (Claude Code, Codex CLI), and provides a control CLI for operations.
 
 ## Install
+
+```bash
+curl -sSf getbuild.ing | sh
+```
+
+The installer is self-contained: it installs `uv` if needed, clones this repo and [`build-secure-transport`](https://github.com/ZechCodes/build-secure-transport) into `~/.local/share/build/`, sets up a `build` launcher in `~/.local/bin/`, and optionally configures auto-start on login. Everything lives under your home directory — no `sudo`, no `/usr/local` writes.
+
+### From source
 
 ```bash
 uv sync
@@ -72,7 +80,7 @@ build stop
 
 ## Harnesses
 
-Agent harness definitions live in `build_client/harnesses/*.json`. Each file defines a harness with its models:
+Agent harness definitions live in `build_bridge/harnesses/*.json`. Each file defines a harness with its models:
 
 ```json
 {
@@ -86,7 +94,7 @@ Agent harness definitions live in `build_client/harnesses/*.json`. Each file def
 }
 ```
 
-To add a new harness, create a JSON file and a corresponding runtime module in `build_client/`, then register the module in `agent_spawner.py`'s `_HARNESS_MODULES` dict.
+To add a new harness, create a JSON file and a corresponding runtime module in `build_bridge/`, then register the module in `agent_spawner.py`'s `_HARNESS_MODULES` dict.
 
 ## Development
 

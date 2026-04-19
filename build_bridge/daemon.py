@@ -24,9 +24,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from build_client.agent_server import AgentServer
-    from build_client.agent_spawner import AgentSpawner
-    from build_client.agent_store import AgentStore
+    from build_bridge.agent_server import AgentServer
+    from build_bridge.agent_spawner import AgentSpawner
+    from build_bridge.agent_store import AgentStore
 
 log = logging.getLogger(__name__)
 
@@ -316,7 +316,7 @@ async def run_daemon(
         await control.start()
 
         # Import here to avoid circular imports.
-        from build_client.cli import async_main
+        from build_bridge.cli import async_main
         await async_main(base_url, reset=reset, agent_port=agent_port, daemon_ctx=ctx)
 
         if ctx.restart_requested:

@@ -1,4 +1,4 @@
-"""Tests for build_client.ws — handshake signing and connection logic."""
+"""Tests for build_bridge.ws — handshake signing and connection logic."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from build_client.config import DeviceConfig, generate_keypair
-from build_client.ws import _sign_handshake, INITIAL_BACKOFF_S, MAX_BACKOFF_S
+from build_bridge.config import DeviceConfig, generate_keypair
+from build_bridge.ws import _sign_handshake, INITIAL_BACKOFF_S, MAX_BACKOFF_S
 
 
 def _make_config() -> DeviceConfig:

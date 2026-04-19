@@ -21,14 +21,14 @@ from build_secure_transport import (
     open_session_init,
 )
 
-from build_client.complications import _run_git, find_git_repo, git_remote_name, git_branch_info
-from build_client.config import DeviceConfig
-from build_client.harness_registry import detect_installed, get_harness, serialize_harnesses
-from build_client.storage import MessageStore
+from build_bridge.complications import _run_git, find_git_repo, git_remote_name, git_branch_info
+from build_bridge.config import DeviceConfig
+from build_bridge.harness_registry import detect_installed, get_harness, serialize_harnesses
+from build_bridge.storage import MessageStore
 
 if TYPE_CHECKING:
-    from build_client.agent_server import AgentServer
-    from build_client.agent_spawner import AgentSpawner
+    from build_bridge.agent_server import AgentServer
+    from build_bridge.agent_spawner import AgentSpawner
 
 log = logging.getLogger(__name__)
 
@@ -315,7 +315,7 @@ class E2EEHandler:
             if self._agent_server:
                 agent_ch = self._agent_server.store.get_channel(c.id)
                 if agent_ch:
-                    from build_client.harness_registry import get_harness
+                    from build_bridge.harness_registry import get_harness
                     entry["harness"] = agent_ch.harness
                     entry["model"] = agent_ch.model
                     info = get_harness(agent_ch.harness)
@@ -1346,7 +1346,7 @@ class E2EEHandler:
         timestamp = self._agent_server.store.reset_session(channel_id)
 
         # Store summary as the first assistant message in the new session.
-        from build_client.agent_protocol import generate_id
+        from build_bridge.agent_protocol import generate_id
         self._agent_server.store.store_chat_message(
             generate_id(), channel_id, "assistant", summary,
         )

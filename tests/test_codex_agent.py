@@ -6,7 +6,7 @@ import json
 import shutil
 from pathlib import Path
 
-from build_client.codex_agent import (
+from build_bridge.codex_agent import (
     _build_history_context,
     _render_plan_text,
     _tool_input_for_item,

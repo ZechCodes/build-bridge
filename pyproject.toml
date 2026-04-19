@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "build-client"
+name = "build-bridge"
 version = "0.1.0"
-description = "Build device client — authenticates with the Build server and maintains a persistent WebSocket connection."
+description = "Build Bridge — device client that authenticates with the Build server and maintains a persistent WebSocket connection."
 requires-python = ">=3.12"
 dependencies = [
     "build-secure-transport",
@@ -20,8 +20,8 @@ dependencies = [
 build-secure-transport = { path = "../build-secure-transport/python" }
 
 [project.scripts]
-build = "build_client.cli:main"
-build-agent = "build_client.build_agent:main"
+build = "build_bridge.cli:main"
+build-agent = "build_bridge.build_agent:main"
 
 [dependency-groups]
 dev = [

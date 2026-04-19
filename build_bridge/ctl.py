@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from build_client.daemon import PIDFILE, SOCKFILE
+from build_bridge.daemon import PIDFILE, SOCKFILE
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:

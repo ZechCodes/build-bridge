@@ -44,7 +44,7 @@ from claude_agent_sdk import (
     tool,
 )
 
-from build_client.agent_wrapper import AgentWrapper, CHAT_MCP_TOOLS
+from build_bridge.agent_wrapper import AgentWrapper, CHAT_MCP_TOOLS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)

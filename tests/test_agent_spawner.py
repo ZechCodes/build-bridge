@@ -1,4 +1,4 @@
-"""Tests for build_client.agent_spawner — agent process management."""
+"""Tests for build_bridge.agent_spawner — agent process management."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from build_client.agent_spawner import AgentSpawner, WorkerInfo, runtime_module_for_harness
-from build_client.agent_store import AgentStore
+from build_bridge.agent_spawner import AgentSpawner, WorkerInfo, runtime_module_for_harness
+from build_bridge.agent_store import AgentStore
 
 
 @pytest.fixture
@@ -130,7 +130,7 @@ class TestSpawn:
 
         worker = await spawner.spawn("ch_codex", "codex", "gpt-5.4")
         assert worker.harness == "codex"
-        assert "build_client.codex_agent" in captured["cmd"]
+        assert "build_bridge.codex_agent" in captured["cmd"]
         await spawner.stop("ch_codex")
 
 
@@ -239,5 +239,5 @@ class TestIsRunning:
 
 class TestHarnessRuntimeDispatch:
     def test_known_harness_modules(self):
-        assert runtime_module_for_harness("claude-code") == "build_client.build_agent"
-        assert runtime_module_for_harness("codex") == "build_client.codex_agent"
+        assert runtime_module_for_harness("claude-code") == "build_bridge.build_agent"
+        assert runtime_module_for_harness("codex") == "build_bridge.codex_agent"

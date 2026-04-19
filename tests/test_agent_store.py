@@ -1,4 +1,4 @@
-"""Tests for build_client.agent_store — SQLite storage for BAP data."""
+"""Tests for build_bridge.agent_store — SQLite storage for BAP data."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from build_client.agent_store import AgentStore
+from build_bridge.agent_store import AgentStore
 
 
 @pytest.fixture

@@ -16,9 +16,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from build_client.agent_wrapper import AgentWrapper
-from build_client.build_chat_bridge import BuildChatBridgeServer
-from build_client.codex_app_server import CodexAppServerClient, CodexAppServerError
+from build_bridge.agent_wrapper import AgentWrapper
+from build_bridge.build_chat_bridge import BuildChatBridgeServer
+from build_bridge.codex_app_server import CodexAppServerClient, CodexAppServerError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 # Also log to a file for debugging (spawner truncates stderr).
@@ -209,7 +209,7 @@ def _write_codex_config(
     config_lines = [
         f"[mcp_servers.{CHAT_SERVER_NAME}]",
         f'command = "{sys.executable}"',
-        'args = ["-m", "build_client.build_chat_bridge"]',
+        'args = ["-m", "build_bridge.build_chat_bridge"]',
         "",
         f"[mcp_servers.{CHAT_SERVER_NAME}.env]",
         f'BUILD_CHAT_BRIDGE_SOCKET = "{bridge_socket}"',
@@ -310,7 +310,7 @@ class CodexHarnessRuntime:
         log.info("Starting Codex app-server...")
         await self.client.start()
         log.info("Codex app-server started, initializing...")
-        await self.client.initialize(client_name="build-client", client_version="0.1.0")
+        await self.client.initialize(client_name="build-bridge", client_version="0.1.0")
         log.info("Codex app-server initialized")
 
         # Try to resume existing thread or start a new one.

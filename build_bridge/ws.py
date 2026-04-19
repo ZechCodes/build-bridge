@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
-from build_client.config import DeviceConfig, save_config
+from build_bridge.config import DeviceConfig, save_config
 from build_secure_transport import generate_transport_keypair
 
 log = logging.getLogger(__name__)

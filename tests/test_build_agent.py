@@ -1,4 +1,4 @@
-"""Tests for build_client.build_agent — Claude Code integration."""
+"""Tests for build_bridge.build_agent — Claude Code integration."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from typing import Any
 
 import pytest
 
-from build_client.agent_protocol import CHAT_RESPONSE, ACTIVITY_DELTA, TOOL_USE
-from build_client.agent_server import AgentServer
-from build_client.agent_store import AgentStore
-from build_client.agent_wrapper import AgentWrapper
-from build_client.build_agent import (
+from build_bridge.agent_protocol import CHAT_RESPONSE, ACTIVITY_DELTA, TOOL_USE
+from build_bridge.agent_server import AgentServer
+from build_bridge.agent_store import AgentStore
+from build_bridge.agent_wrapper import AgentWrapper
+from build_bridge.build_agent import (
     CHAT_CONTEXT,
     build_agent_options,
     handle_response_message,

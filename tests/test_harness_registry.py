@@ -1,10 +1,10 @@
-"""Tests for build_client.harness_registry — harness detection and serialization."""
+"""Tests for build_bridge.harness_registry — harness detection and serialization."""
 
 from __future__ import annotations
 
 from unittest.mock import patch
 
-from build_client.harness_registry import (
+from build_bridge.harness_registry import (
     KNOWN_HARNESSES,
     HarnessInfo,
     ModelInfo,
@@ -43,7 +43,7 @@ class TestKnownHarnesses:
 
 class TestDetectInstalled:
     def test_detects_installed_binary(self):
-        with patch("build_client.harness_registry.shutil.which") as mock_which:
+        with patch("build_bridge.harness_registry.shutil.which") as mock_which:
             mock_which.side_effect = lambda name: "/usr/bin/claude" if name == "claude" else None
             harnesses = detect_installed()
             cc = next(h for h in harnesses if h.id == "claude-code")
@@ -52,17 +52,17 @@ class TestDetectInstalled:
             assert cx.installed is False
 
     def test_returns_all_known_harnesses(self):
-        with patch("build_client.harness_registry.shutil.which", return_value=None):
+        with patch("build_bridge.harness_registry.shutil.which", return_value=None):
             harnesses = detect_installed()
             assert len(harnesses) == len(KNOWN_HARNESSES)
 
     def test_none_installed_when_no_binaries(self):
-        with patch("build_client.harness_registry.shutil.which", return_value=None):
+        with patch("build_bridge.harness_registry.shutil.which", return_value=None):
             harnesses = detect_installed()
             assert all(not h.installed for h in harnesses)
 
     def test_all_installed_when_all_binaries(self):
-        with patch("build_client.harness_registry.shutil.which", return_value="/usr/bin/something"):
+        with patch("build_bridge.harness_registry.shutil.which", return_value="/usr/bin/something"):
             harnesses = detect_installed()
             assert all(h.installed for h in harnesses)
 

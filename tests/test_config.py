@@ -1,4 +1,4 @@
-"""Tests for build_client.config — keypair generation and config persistence."""
+"""Tests for build_bridge.config — keypair generation and config persistence."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from build_client.config import (
+from build_bridge.config import (
     DeviceConfig,
     generate_keypair,
     load_config,

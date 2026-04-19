@@ -1,10 +1,10 @@
-"""Tests for build_client.agent_protocol — envelope, validation, capabilities."""
+"""Tests for build_bridge.agent_protocol — envelope, validation, capabilities."""
 
 from __future__ import annotations
 
 import pytest
 
-from build_client.agent_protocol import (
+from build_bridge.agent_protocol import (
     ACTIVITY_DELTA,
     AGENT_CONFIGURED,
     AGENT_ERROR,

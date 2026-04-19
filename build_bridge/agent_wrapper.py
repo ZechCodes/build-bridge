@@ -44,7 +44,7 @@ from typing import Any, Callable, Coroutine
 from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
-from build_client.agent_protocol import (
+from build_bridge.agent_protocol import (
     ACTIVITY_DELTA,
     ACTIVITY_END,
     ACTIVITY_PING,
@@ -67,7 +67,7 @@ from build_client.agent_protocol import (
     now_iso,
     validate_envelope,
 )
-from build_client.chat_mcp import ChatMCP
+from build_bridge.chat_mcp import ChatMCP
 
 log = logging.getLogger(__name__)
 

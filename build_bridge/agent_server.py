@@ -20,7 +20,7 @@ from typing import Any, Callable, Coroutine
 import websockets
 from websockets.asyncio.server import serve as ws_serve, ServerConnection
 
-from build_client.agent_protocol import (
+from build_bridge.agent_protocol import (
     ACTIVITY_DELTA,
     ACTIVITY_END,
     ACTIVITY_PING,
@@ -51,8 +51,8 @@ from build_client.agent_protocol import (
     validate_agent_hello,
     validate_envelope,
 )
-from build_client.agent_store import AgentStore
-from build_client.complications import find_git_repo, _run_git
+from build_bridge.agent_store import AgentStore
+from build_bridge.complications import find_git_repo, _run_git
 
 log = logging.getLogger(__name__)
 
@@ -597,7 +597,7 @@ class AgentServer:
     @staticmethod
     def _agent_display_name(agent: AgentConnection) -> str:
         """Get the display name for an agent (e.g., 'Claude Code')."""
-        from build_client.harness_registry import get_harness
+        from build_bridge.harness_registry import get_harness
         info = get_harness(agent.harness)
         return info.name if info else "Device"
 

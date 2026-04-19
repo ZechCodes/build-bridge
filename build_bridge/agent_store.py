@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from build_client.agent_protocol import now_iso
+from build_bridge.agent_protocol import now_iso
 
 
 DEFAULT_DB_PATH = Path.home() / ".config" / "build" / "messages.db"

@@ -1,4 +1,4 @@
-"""Tests for build_client.agent_server — BAP WebSocket server integration tests."""
+"""Tests for build_bridge.agent_server — BAP WebSocket server integration tests."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from websockets.asyncio.client import connect as ws_connect
 
-from build_client.agent_protocol import (
+from build_bridge.agent_protocol import (
     AGENT_CONFIGURED,
     AGENT_ERROR,
     AGENT_HELLO,
@@ -22,8 +22,8 @@ from build_client.agent_protocol import (
     PROTOCOL_VERSION,
     make_envelope,
 )
-from build_client.agent_server import AgentServer
-from build_client.agent_store import AgentStore
+from build_bridge.agent_server import AgentServer
+from build_bridge.agent_store import AgentStore
 
 
 # ---------------------------------------------------------------------------

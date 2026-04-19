@@ -1,4 +1,4 @@
-"""Tests for build_client.auth — registration and SSE approval flow."""
+"""Tests for build_bridge.auth — registration and SSE approval flow."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from build_client.auth import register_device, wait_for_approval, dismiss_pending
+from build_bridge.auth import register_device, wait_for_approval, dismiss_pending
 
 
 class TestRegisterDevice:
@@ -17,7 +17,7 @@ class TestRegisterDevice:
         mock_resp.json.return_value = {"code": "abc123", "auth_url": "https://example.com/approve/abc123"}
         mock_resp.raise_for_status = MagicMock()
 
-        with patch("build_client.auth.httpx.AsyncClient") as MockClient:
+        with patch("build_bridge.auth.httpx.AsyncClient") as MockClient:
             instance = AsyncMock()
             instance.post.return_value = mock_resp
             instance.__aenter__ = AsyncMock(return_value=instance)
@@ -71,7 +71,7 @@ class TestWaitForApproval:
         ]
 
         mock_client = _make_sse_client(sse_lines)
-        with patch("build_client.auth.httpx.AsyncClient", return_value=mock_client):
+        with patch("build_bridge.auth.httpx.AsyncClient", return_value=mock_client):
             result = await wait_for_approval("https://example.com", "abc123")
             assert result["type"] == "approved"
             assert result["device_id"] == "dev-001"
@@ -83,7 +83,7 @@ class TestWaitForApproval:
         ]
 
         mock_client = _make_sse_client(sse_lines)
-        with patch("build_client.auth.httpx.AsyncClient", return_value=mock_client):
+        with patch("build_bridge.auth.httpx.AsyncClient", return_value=mock_client):
             with pytest.raises(SystemExit, match="expired"):
                 await wait_for_approval("https://example.com", "abc123")
 
@@ -95,7 +95,7 @@ class TestDismissPending:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("build_client.auth.httpx.AsyncClient", return_value=mock_client):
+        with patch("build_bridge.auth.httpx.AsyncClient", return_value=mock_client):
             await dismiss_pending("https://example.com", "abc123")
             mock_client.delete.assert_called_once_with(
                 "https://example.com/api/devices/pending/abc123"
@@ -109,6 +109,6 @@ class TestDismissPending:
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client.delete.side_effect = Exception("network error")
 
-        with patch("build_client.auth.httpx.AsyncClient", return_value=mock_client):
+        with patch("build_bridge.auth.httpx.AsyncClient", return_value=mock_client):
             # Should not raise.
             await dismiss_pending("https://example.com", "abc123")

@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from build_client.agent_store import AgentStore
+from build_bridge.agent_store import AgentStore
 
 log = logging.getLogger(__name__)
 
@@ -28,8 +28,8 @@ RESTART_ATTEMPTS_RESET_AFTER_S = 300.0  # reset counter after 5 min of stability
 
 
 _HARNESS_MODULES: dict[str, str] = {
-    "claude-code": "build_client.build_agent",
-    "codex": "build_client.codex_agent",
+    "claude-code": "build_bridge.build_agent",
+    "codex": "build_bridge.codex_agent",
 }
 
 
@@ -178,7 +178,7 @@ class AgentSpawner:
         # as a nested Claude Code session.
         env.pop("CLAUDECODE", None)
 
-        # Ensure build_client is importable from any cwd by adding the
+        # Ensure build_bridge is importable from any cwd by adding the
         # project root to PYTHONPATH.  sys.executable lives in the venv
         # but the package may not be pip-installed (uv run sets it up).
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

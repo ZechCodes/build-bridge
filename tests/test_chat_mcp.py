@@ -1,4 +1,4 @@
-"""Tests for build_client.chat_mcp — Chat MCP tool handlers and message queue."""
+"""Tests for build_bridge.chat_mcp — Chat MCP tool handlers and message queue."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from build_client.chat_mcp import ChatMCP
+from build_bridge.chat_mcp import ChatMCP
 
 
 class TestMessageQueue:

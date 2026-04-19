@@ -9,7 +9,7 @@ import webbrowser
 
 import httpx
 
-from build_client.config import DeviceConfig, generate_keypair, save_config
+from build_bridge.config import DeviceConfig, generate_keypair, save_config
 
 log = logging.getLogger(__name__)
 

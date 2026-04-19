@@ -22,18 +22,18 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from build_client.agent_server import AgentServer, DEFAULT_AGENT_PORT
-from build_client.agent_spawner import AgentSpawner
-from build_client.agent_store import AgentStore
-from build_client.auth import device_auth_flow
-from build_client.complications import ComplicationRegistry
-from build_client.config import load_config
-from build_client.e2ee import E2EEHandler
-from build_client.storage import MessageStore
-from build_client.ws import run_connection
+from build_bridge.agent_server import AgentServer, DEFAULT_AGENT_PORT
+from build_bridge.agent_spawner import AgentSpawner
+from build_bridge.agent_store import AgentStore
+from build_bridge.auth import device_auth_flow
+from build_bridge.complications import ComplicationRegistry
+from build_bridge.config import load_config
+from build_bridge.e2ee import E2EEHandler
+from build_bridge.storage import MessageStore
+from build_bridge.ws import run_connection
 
 if TYPE_CHECKING:
-    from build_client.daemon import DaemonContext
+    from build_bridge.daemon import DaemonContext
 
 LOG_DIR = Path.home() / ".config" / "build" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -277,9 +277,9 @@ def main() -> None:
 
 
 def _cmd_start(args: argparse.Namespace) -> None:
-    from build_client.daemon import main_with_watchdog, run_daemon
-    from build_client.ctl import is_running
-    from build_client.config import load_config
+    from build_bridge.daemon import main_with_watchdog, run_daemon
+    from build_bridge.ctl import is_running
+    from build_bridge.config import load_config
 
     running, pid = is_running()
     if running:
@@ -310,10 +310,10 @@ def _spawn_detached(args: argparse.Namespace) -> None:
     """Re-exec ourselves in the background with --foreground, then return."""
     import subprocess
     import time
-    from build_client.ctl import is_running
+    from build_bridge.ctl import is_running
 
     cmd = [
-        sys.executable, "-m", "build_client.cli", "start", "--foreground",
+        sys.executable, "-m", "build_bridge.cli", "start", "--foreground",
         "--url", args.url,
         "--agent-port", str(args.agent_port),
     ]
@@ -345,7 +345,7 @@ def _spawn_detached(args: argparse.Namespace) -> None:
 
 
 def _cmd_stop(args: argparse.Namespace) -> None:
-    from build_client.ctl import send_command, is_running, print_not_running
+    from build_bridge.ctl import send_command, is_running, print_not_running
 
     running, pid = is_running()
     if not running:
@@ -362,7 +362,7 @@ def _cmd_stop(args: argparse.Namespace) -> None:
 
 
 def _cmd_restart(args: argparse.Namespace) -> None:
-    from build_client.ctl import send_command, is_running, print_not_running
+    from build_bridge.ctl import send_command, is_running, print_not_running
 
     running, pid = is_running()
     if not running:
@@ -379,7 +379,7 @@ def _cmd_restart(args: argparse.Namespace) -> None:
 
 
 def _cmd_status() -> None:
-    from build_client.ctl import send_command, is_running, print_status, print_not_running
+    from build_bridge.ctl import send_command, is_running, print_status, print_not_running
 
     running, pid = is_running()
     if not running:
@@ -423,7 +423,7 @@ def _cmd_logs(args: argparse.Namespace) -> None:
 
 
 def _cmd_agents() -> None:
-    from build_client.ctl import send_command, print_agents, print_not_running
+    from build_bridge.ctl import send_command, print_agents, print_not_running
 
     try:
         resp = send_command({"cmd": "agents"})
@@ -436,7 +436,7 @@ def _cmd_agents() -> None:
 
 
 def _cmd_agent_control(cmd: str, channel: str) -> None:
-    from build_client.ctl import send_command, print_not_running
+    from build_bridge.ctl import send_command, print_not_running
 
     try:
         resp = send_command({"cmd": cmd, "channel": channel})

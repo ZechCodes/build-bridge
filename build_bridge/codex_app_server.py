@@ -81,7 +81,7 @@ class CodexAppServerClient:
     async def initialize(
         self,
         *,
-        client_name: str = "build-client",
+        client_name: str = "build-bridge",
         client_version: str = "0.1.0",
         experimental_api: bool = True,
         opt_out_notifications: list[str] | None = None,
