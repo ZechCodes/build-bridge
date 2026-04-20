@@ -675,11 +675,41 @@ class CodexHarnessRuntime:
             await self.wrapper.emit_activity_delta("text", delta)
 
     async def _on_turn_plan_updated(self, params: dict[str, Any]) -> None:
+        plan = params.get("plan", []) or []
         self.latest_plan_text = _render_plan_text(
             params.get("explanation"),
-            params.get("plan", []),
+            plan,
         )
         self.latest_plan_turn_id = params.get("turnId")
+
+        # Mirror Codex's plan into the same shape Claude Code's TodoWrite tool
+        # uses, so the dashboard's sidebar Tasks section populates identically
+        # across harnesses. Emitted as a synthetic TodoWrite tool_use — no new
+        # BAP event type needed, and the browser treats it as a normal todo
+        # update (see channelTodos handling in dashboard.html).
+        turn_id = self.latest_plan_turn_id or "turn"
+        todos = []
+        for i, step in enumerate(plan):
+            raw_status = (step.get("status") or "pending").lower()
+            status = {
+                "completed": "completed",
+                "inprogress": "in_progress",
+                "in_progress": "in_progress",
+                "pending": "pending",
+            }.get(raw_status, "pending")
+            todos.append({
+                "id": f"{turn_id}:{i}",
+                "content": step.get("step", "") or "",
+                "status": status,
+            })
+        try:
+            await self.wrapper.emit_tool_use(
+                f"codex-plan-{turn_id}-{uuid.uuid4().hex[:8]}",
+                "TodoWrite",
+                {"todos": todos},
+            )
+        except Exception:
+            log.debug("Failed to emit synthetic TodoWrite for Codex plan", exc_info=True)
 
     async def _on_item_started(self, params: dict[str, Any]) -> None:
         self._last_activity = time.monotonic()
