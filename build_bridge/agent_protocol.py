@@ -46,6 +46,9 @@ INTERACTION_RESPONSE = "interaction.response"
 # Agent state (no capability required — part of agent namespace).
 AGENT_STATE_UPDATE = "agent.state_update"
 AGENT_SYSTEM_MESSAGE = "agent.system_message"
+# Workspace filesystem change events (no capability required).
+# Payload: {"paths": ["rel/path.ts", ...]}
+AGENT_FILE_CHANGES = "agent.file_changes"
 
 # ---------------------------------------------------------------------------
 # Direction constraints
@@ -53,6 +56,7 @@ AGENT_SYSTEM_MESSAGE = "agent.system_message"
 
 AGENT_TO_CLIENT: frozenset[str] = frozenset({
     AGENT_HELLO, AGENT_GOODBYE, AGENT_STATE_UPDATE, AGENT_SYSTEM_MESSAGE,
+    AGENT_FILE_CHANGES,
     CHAT_RESPONSE,
     ACTIVITY_DELTA, ACTIVITY_PING, ACTIVITY_END,
     TOOL_USE, TOOL_RESULT,
@@ -82,7 +86,7 @@ CAPABILITY_TYPES: dict[str, frozenset[str]] = {
 
 AGENT_NAMESPACE_TYPES: frozenset[str] = frozenset({
     AGENT_HELLO, AGENT_CONFIGURED, AGENT_SHUTDOWN, AGENT_GOODBYE, AGENT_ERROR,
-    AGENT_STATE_UPDATE,
+    AGENT_STATE_UPDATE, AGENT_FILE_CHANGES,
 })
 
 # ---------------------------------------------------------------------------

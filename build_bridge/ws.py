@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import time
 from typing import Callable, Coroutine, Any
 
@@ -142,7 +143,9 @@ async def run_connection(
     config = _ensure_transport_keypair(config)
 
     # Build the WS URL from the relay URL (separate from base_url, which is the web API).
-    ws_base = config.relay_url.replace("https://", "wss://").replace("http://", "ws://").rstrip("/")
+    # Allow an env-var override for local dev without re-registering the device.
+    relay_url = os.environ.get("BUILD_RELAY_URL", config.relay_url)
+    ws_base = relay_url.replace("https://", "wss://").replace("http://", "ws://").rstrip("/")
     ws_url = f"{ws_base}/ws/device"
 
     backoff = INITIAL_BACKOFF_S

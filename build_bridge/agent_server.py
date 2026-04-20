@@ -28,6 +28,7 @@ from build_bridge.agent_protocol import (
     AGENT_GOODBYE,
     AGENT_HELLO,
     AGENT_CONFIGURED,
+    AGENT_FILE_CHANGES,
     AGENT_STATE_UPDATE,
     AGENT_SYSTEM_MESSAGE,
     AGENT_TO_CLIENT,
@@ -1066,6 +1067,21 @@ class AgentServer:
             "text": payload.get("text", ""),
         })
 
+    async def _handle_file_changes(
+        self, agent: AgentConnection, data: dict[str, Any],
+    ) -> None:
+        """Forward agent.file_changes to the browser for live diff refresh."""
+        payload = data["payload"] or {}
+        paths = payload.get("paths") or []
+        if not isinstance(paths, list):
+            return
+        await self._notify_browser(agent.channel_id, {
+            "action": "agent_event",
+            "channel_id": agent.channel_id,
+            "event_type": "agent.file_changes",
+            "event": {"paths": paths},
+        })
+
     # Handler dispatch table.
     _handlers: dict[str, Any] = {
         CHAT_RESPONSE: _handle_chat_response,
@@ -1079,6 +1095,7 @@ class AgentServer:
         INTERACTION_REQUEST: _handle_interaction_request,
         AGENT_STATE_UPDATE: _handle_state_update,
         AGENT_SYSTEM_MESSAGE: _handle_system_message,
+        AGENT_FILE_CHANGES: _handle_file_changes,
     }
 
     # -----------------------------------------------------------------

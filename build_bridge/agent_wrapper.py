@@ -50,6 +50,7 @@ from build_bridge.agent_protocol import (
     ACTIVITY_PING,
     AGENT_CONFIGURED,
     AGENT_ERROR,
+    AGENT_FILE_CHANGES,
     AGENT_GOODBYE,
     AGENT_HELLO,
     AGENT_SHUTDOWN,
@@ -150,6 +151,9 @@ class AgentWrapper:
         self.pending_effort: str | None = None
         self.pending_plan_mode: bool | None = None
 
+        # Workspace filesystem watcher (started after agent.configured).
+        self._workspace_watcher: Any = None
+
     # -----------------------------------------------------------------
     # Properties
     # -----------------------------------------------------------------
@@ -240,10 +244,15 @@ class AgentWrapper:
             "Connected to channel %s (harness=%s, model=%s)",
             self._config.channel_id[:8], self._harness, self._model,
         )
+
+        # Start the workspace filesystem watcher so file edits push to the browser live.
+        self._start_workspace_watcher()
+
         return self._config
 
     async def disconnect(self, reason: str = "shutdown_ack") -> None:
         """Send agent.goodbye and close the connection."""
+        self._stop_workspace_watcher()
         if self._ws:
             try:
                 goodbye = make_envelope(AGENT_GOODBYE, {"reason": reason})
@@ -494,6 +503,44 @@ class AgentWrapper:
             "resume_cursor": cursor,
         })
         await self._send(envelope)
+
+    async def emit_file_changes(self, paths: list[str]) -> None:
+        """Emit agent.file_changes — workspace paths modified since last flush."""
+        if not paths:
+            return
+        envelope = make_envelope(AGENT_FILE_CHANGES, {"paths": paths})
+        await self._send(envelope)
+
+    def _start_workspace_watcher(self) -> None:
+        cfg = self._config
+        if not cfg or not cfg.working_directory:
+            return
+        try:
+            from build_bridge.workspace_watcher import WorkspaceWatcher
+        except ImportError:
+            log.debug("workspace_watcher unavailable", exc_info=True)
+            return
+        if self._workspace_watcher is not None:
+            return
+        try:
+            watcher = WorkspaceWatcher(
+                repo_path=cfg.working_directory,
+                on_change=self.emit_file_changes,
+                loop=asyncio.get_event_loop(),
+            )
+            watcher.start()
+            self._workspace_watcher = watcher
+        except Exception:  # noqa: BLE001
+            log.debug("Failed to start workspace watcher", exc_info=True)
+
+    def _stop_workspace_watcher(self) -> None:
+        watcher = self._workspace_watcher
+        self._workspace_watcher = None
+        if watcher is not None:
+            try:
+                watcher.stop()
+            except Exception:  # noqa: BLE001
+                log.debug("Failed to stop workspace watcher", exc_info=True)
 
     async def request_interaction(
         self,
