@@ -705,6 +705,13 @@ class AgentServer:
             end_line = int(m.group(2)) if m.group(2) else None
             rel_path = m.group(3).strip()
 
+            # [[file]] paths must be absolute. The agent always knows the
+            # full path (either from its own tools or from the channel's
+            # working_directory), so rejecting relative paths avoids
+            # ambiguity about which cwd we'd resolve against.
+            if not os.path.isabs(rel_path):
+                return f"[Path must be absolute: {rel_path}]"
+
             resolved = self._resolve_safe_path(cwd, rel_path)
             if resolved is None or not os.path.isfile(resolved):
                 return f"[Could not read: {rel_path}]"
@@ -769,6 +776,8 @@ class AgentServer:
             if "|" in raw:
                 parts = raw.split("|", 1)
                 path1, path2 = parts[0].strip(), parts[1].strip()
+                if not os.path.isabs(path1) or not os.path.isabs(path2):
+                    return f"[Path must be absolute: {raw}]"
                 resolved1 = self._resolve_safe_path(cwd, path1)
                 resolved2 = self._resolve_safe_path(cwd, path2)
                 if not resolved1 or not resolved2:
@@ -778,6 +787,8 @@ class AgentServer:
                 display_path = f"{path1} vs {path2}"
             else:
                 rel_path = raw
+                if not os.path.isabs(rel_path):
+                    return f"[Path must be absolute: {rel_path}]"
                 resolved = self._resolve_safe_path(cwd, rel_path)
                 if not resolved:
                     return f"[Could not diff: {rel_path}]"
