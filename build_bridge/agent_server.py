@@ -8,6 +8,7 @@ to browser clients via a broadcast callback.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -660,6 +661,17 @@ class AgentServer:
     _EMBED_DIFF_RE = re.compile(r"\[\[diff\]\]\(([^)]+)\)")
     _MAX_EMBED_SIZE = 50 * 1024  # 50 KB per embed
     _MAX_EMBEDS = 10
+    _MAX_IMAGE_EMBED_BYTES = 2 * 1024 * 1024  # 2 MiB per image embed
+    _IMAGE_MIME = {
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "webp": "image/webp",
+        "avif": "image/avif",
+        "bmp": "image/bmp",
+        "svg": "image/svg+xml",
+    }
 
     def _resolve_safe_path(self, base_dir: str, relative_path: str) -> str | None:
         """Resolve relative_path under base_dir, or accept absolute paths."""
@@ -697,6 +709,28 @@ class AgentServer:
             if resolved is None or not os.path.isfile(resolved):
                 return f"[Could not read: {rel_path}]"
 
+            ext = os.path.splitext(rel_path)[1].lstrip(".").lower()
+
+            # Images: read binary, base64-encode, ship in a <build-image>
+            # tag the frontend can render directly as a data-URI. Line
+            # ranges are meaningless for images — the `start_line`/
+            # `end_line` capture groups are ignored on this branch.
+            if ext in self._IMAGE_MIME:
+                try:
+                    with open(resolved, "rb") as f:
+                        raw = f.read(self._MAX_IMAGE_EMBED_BYTES + 1)
+                except OSError:
+                    return f"[Could not read: {rel_path}]"
+                if len(raw) > self._MAX_IMAGE_EMBED_BYTES:
+                    return f"[Image too large: {rel_path}]"
+                mime = self._IMAGE_MIME[ext]
+                b64 = base64.b64encode(raw).decode("ascii")
+                return (
+                    f'<build-image path="{rel_path}" mime="{mime}">\n'
+                    f"{b64}\n"
+                    f"</build-image>"
+                )
+
             try:
                 with open(resolved, "r", errors="replace") as f:
                     file_content = f.read(self._MAX_EMBED_SIZE + 1)
@@ -717,8 +751,7 @@ class AgentServer:
             else:
                 line_attr = ""
 
-            ext_match = os.path.splitext(rel_path)
-            lang = ext_match[1].lstrip(".").lower() if ext_match[1] else ""
+            lang = ext
 
             return (
                 f'<build-file path="{rel_path}" lang="{lang}"{line_attr}>\n'
