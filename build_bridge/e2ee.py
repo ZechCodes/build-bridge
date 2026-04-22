@@ -1558,11 +1558,44 @@ class E2EEHandler:
         if truncated:
             raw_entries = raw_entries[:self._MAX_DIR_ENTRIES]
 
-        # Enrich with git metadata if inside a git repo.
+        # Fast path: send the bare directory listing immediately so the
+        # client can render the tree. Git enrichment (status / numstat
+        # / check-ignore — 4 subprocess calls, up to several seconds on
+        # a large monorepo) runs in the background and pushes a second
+        # `files_list_result` frame for the same path when it's ready.
+        # The client stores keyed by path so the second frame just
+        # overwrites the first.
+        await self._send_frame(session, ws, payload={
+            "action": "files_list_result",
+            "channel_id": channel_id,
+            "path": rel_path,
+            "entries": raw_entries,
+            "truncated": truncated,
+        })
+
         repo = find_git_repo(resolved)
         if repo:
+            asyncio.create_task(self._enrich_files_list_with_git(
+                session, ws, channel_id, rel_path, resolved, repo, raw_entries, truncated,
+            ))
+
+    async def _enrich_files_list_with_git(
+        self,
+        session: ActiveSession,
+        ws: Any,
+        channel_id: str,
+        rel_path: str,
+        resolved: str,
+        repo: str,
+        raw_entries: list[dict[str, Any]],
+        truncated: bool,
+    ) -> None:
+        """Run git status / numstat / check-ignore in parallel and
+        broadcast an enriched `files_list_result` frame. Called from
+        `_handle_files_list` after the bare listing has already been
+        sent, so the tree stays responsive on large monorepos."""
+        try:
             repo_root = Path(repo).resolve()
-            # Relative path from repo root to the listed directory.
             try:
                 dir_rel_to_repo = str(Path(resolved).resolve().relative_to(repo_root))
                 if dir_rel_to_repo == ".":
@@ -1570,13 +1603,11 @@ class E2EEHandler:
             except ValueError:
                 dir_rel_to_repo = ""
 
-            # Build paths for check-ignore.
             entry_abs_paths = [os.path.join(resolved, e["name"]) for e in raw_entries]
             stdin_data = "\n".join(entry_abs_paths).encode() if entry_abs_paths else b""
 
-            # Run git commands concurrently.
-            status_task = _run_git(repo, ["status", "--porcelain=v1", "--", resolved])
-            numstat_task = _run_git(repo, ["diff", "--numstat", "--", resolved])
+            status_task         = _run_git(repo, ["status", "--porcelain=v1", "--", resolved])
+            numstat_task        = _run_git(repo, ["diff", "--numstat", "--", resolved])
             numstat_cached_task = _run_git(repo, ["diff", "--cached", "--numstat", "--", resolved])
             async def _noop_git() -> tuple[str, bool]:
                 return ("", False)
@@ -1586,79 +1617,65 @@ class E2EEHandler:
                 status_task, numstat_task, numstat_cached_task, ignore_task,
                 return_exceptions=True,
             )
-
-            status_out = results[0] if not isinstance(results[0], BaseException) else ("", False)
-            numstat_out = results[1] if not isinstance(results[1], BaseException) else ("", False)
+            status_out         = results[0] if not isinstance(results[0], BaseException) else ("", False)
+            numstat_out        = results[1] if not isinstance(results[1], BaseException) else ("", False)
             numstat_cached_out = results[2] if not isinstance(results[2], BaseException) else ("", False)
-            ignore_out = results[3] if not isinstance(results[3], BaseException) else ("", False)
+            ignore_out         = results[3] if not isinstance(results[3], BaseException) else ("", False)
 
-            status_map = self._parse_porcelain_status(status_out[0])
-            numstat_map = self._parse_numstat_per_file(numstat_out[0])
+            status_map         = self._parse_porcelain_status(status_out[0])
+            numstat_map        = self._parse_numstat_per_file(numstat_out[0])
             numstat_cached_map = self._parse_numstat_per_file(numstat_cached_out[0])
             ignored_set = {line.strip() for line in ignore_out[0].splitlines() if line.strip()} if ignore_out[0] else set()
 
             for entry in raw_entries:
-                # Compute path relative to repo root for git status matching.
                 entry_repo_rel = os.path.join(dir_rel_to_repo, entry["name"]) if dir_rel_to_repo else entry["name"]
 
-                # Git status --porcelain paths are relative to repo root.
                 if entry_repo_rel in status_map:
                     staged, unstaged = status_map[entry_repo_rel]
                     entry["staged_status"] = staged if staged.strip() else None
-                    entry["git_status"] = unstaged if unstaged.strip() else None
-                else:
-                    # For directories, check if any child has status.
-                    if entry["type"] == "dir":
-                        prefix = entry_repo_rel + "/"
-                        has_staged = has_unstaged = False
-                        for p, (s, u) in status_map.items():
-                            if p.startswith(prefix):
-                                if s.strip():
-                                    has_staged = True
-                                if u.strip():
-                                    has_unstaged = True
-                                if has_staged and has_unstaged:
-                                    break
-                        if has_staged:
-                            entry["staged_status"] = "M"
-                        if has_unstaged:
-                            entry["git_status"] = "M"
+                    entry["git_status"]    = unstaged if unstaged.strip() else None
+                elif entry["type"] == "dir":
+                    prefix = entry_repo_rel + "/"
+                    has_staged = has_unstaged = False
+                    for p, (s, u) in status_map.items():
+                        if p.startswith(prefix):
+                            if s.strip(): has_staged = True
+                            if u.strip(): has_unstaged = True
+                            if has_staged and has_unstaged:
+                                break
+                    if has_staged:   entry["staged_status"] = "M"
+                    if has_unstaged: entry["git_status"]    = "M"
 
-                # Numstat — insertions/deletions.
                 ins, dels = 0, 0
                 if entry_repo_rel in numstat_map:
                     i, d = numstat_map[entry_repo_rel]
-                    ins += i
-                    dels += d
+                    ins += i; dels += d
                 if entry_repo_rel in numstat_cached_map:
                     i, d = numstat_cached_map[entry_repo_rel]
-                    ins += i
-                    dels += d
-                # For directories, sum children.
+                    ins += i; dels += d
                 if entry["type"] == "dir":
                     prefix = entry_repo_rel + "/"
                     for p, (i, d) in numstat_map.items():
                         if p.startswith(prefix):
-                            ins += i
-                            dels += d
+                            ins += i; dels += d
                     for p, (i, d) in numstat_cached_map.items():
                         if p.startswith(prefix):
-                            ins += i
-                            dels += d
+                            ins += i; dels += d
                 entry["insertions"] = ins
-                entry["deletions"] = dels
+                entry["deletions"]  = dels
 
-                # Gitignored.
                 entry_abs = os.path.join(resolved, entry["name"])
                 entry["is_gitignored"] = entry_abs in ignored_set
 
-        await self._send_frame(session, ws, payload={
-            "action": "files_list_result",
-            "channel_id": channel_id,
-            "path": rel_path,
-            "entries": raw_entries,
-            "truncated": truncated,
-        })
+            await self._send_frame(session, ws, payload={
+                "action": "files_list_result",
+                "channel_id": channel_id,
+                "path": rel_path,
+                "entries": raw_entries,
+                "truncated": truncated,
+            })
+        except Exception:
+            log.debug("files_list git enrichment failed", exc_info=True)
 
     def _find_all_git_repos(self, cwd: str) -> list[str]:
         """Find all git repos at cwd itself and 1-2 levels deep."""
