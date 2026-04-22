@@ -1114,7 +1114,10 @@ class AgentServer:
     async def _handle_file_changes(
         self, agent: AgentConnection, data: dict[str, Any],
     ) -> None:
-        """Forward agent.file_changes to the browser for live diff refresh."""
+        """Forward agent.file_changes to the browser for live diff refresh,
+        and trigger a debounced git-complication re-eval so the chip
+        (branch / ahead-behind / staged / unstaged) tracks filesystem
+        changes in real time — not just on agent tool use."""
         payload = data["payload"] or {}
         paths = payload.get("paths") or []
         if not isinstance(paths, list):
@@ -1125,6 +1128,14 @@ class AgentServer:
             "event_type": "agent.file_changes",
             "event": {"paths": paths},
         })
+        if self._complications:
+            channel = self.store.get_channel(agent.channel_id)
+            working_dir = channel.working_directory if channel else ""
+            asyncio.create_task(
+                self._complications.on_filesystem_change(
+                    agent.channel_id, working_dir,
+                )
+            )
 
     # Handler dispatch table.
     _handlers: dict[str, Any] = {

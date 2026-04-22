@@ -510,12 +510,38 @@ class ComplicationRegistry:
         if not repos:
             repos = self._active_repos.get(channel_id, set()).copy()
 
+        self._schedule_evaluation(channel_id, repos)
+
+    async def on_filesystem_change(
+        self,
+        channel_id: str,
+        working_directory: str = "",
+    ) -> None:
+        """Called when the agent's workspace watcher reports a filesystem
+        change. Re-evaluates git status for the repo containing the
+        working directory plus any repos already tracked for this channel.
+
+        Unlike on_tool_event(), this fires for *any* file change — reads,
+        manual edits in another window, test runs that touch artifacts,
+        etc. — so the git chip stays fresh without waiting for the 30s
+        polling fallback."""
+        repos: set[str] = set()
+        if working_directory:
+            repo = find_git_repo(working_directory)
+            if repo:
+                repos.add(repo)
+        # Re-eval anything we're already tracking for this channel.
+        repos.update(self._active_repos.get(channel_id, set()))
+        if not repos:
+            return
+        self._schedule_evaluation(channel_id, repos)
+
+    def _schedule_evaluation(self, channel_id: str, repos: set[str]) -> None:
+        """Queue a debounced evaluation for each of `repos`. Replaces any
+        pending evaluation for the same (channel, repo) pair."""
         for repo in repos:
-            # Track as active for polling.
             self._active_repos.setdefault(channel_id, set()).add(repo)
-            # Start polling if not already running.
             self.start_polling()
-            # Schedule debounced evaluation.
             key = f"{channel_id}:{repo}"
             if key in self._pending:
                 self._pending[key].cancel()
