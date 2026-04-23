@@ -219,6 +219,25 @@ class AgentStore:
         ).fetchone()
         return self._row_to_channel(row) if row else None
 
+    def ensure_channel_row(self, channel_id: str) -> None:
+        """Create an empty stub row for channel_id if one doesn't already exist.
+
+        Stub rows have empty agent_id / harness / model. They exist so that
+        config edits (working_directory, effort, auto_approve_tools, …) always
+        hit a real row instead of silently no-op'ing on a missing channel.
+
+        The daemon's respawn loop filters stubs out via list_resumable_channels,
+        and agent_spawner.restart() bails out early if harness is still empty."""
+        now = now_iso()
+        self.db.execute(
+            """INSERT OR IGNORE INTO agent_channels
+               (id, agent_id, harness, model, system_prompt, working_directory,
+                status, created_at, updated_at, auto_approve_tools)
+               VALUES (?, '', '', '', '', '', 'idle', ?, ?, 0)""",
+            (channel_id, now, now),
+        )
+        self.db.commit()
+
     def update_channel_status(self, channel_id: str, status: str) -> None:
         """Update a channel's status and updated_at timestamp."""
         self.db.execute(
@@ -271,10 +290,13 @@ class AgentStore:
         """List channels that should have agents re-spawned on restart.
 
         Includes 'active' (agent was working) and 'idle' (agent was waiting
-        for input) channels.
+        for input) channels. Stub rows (harness='') are excluded — they
+        can't be respawned because the harness determines the binary.
         """
         rows = self.db.execute(
-            "SELECT * FROM agent_channels WHERE status IN ('active', 'idle') ORDER BY updated_at DESC",
+            "SELECT * FROM agent_channels "
+            "WHERE status IN ('active', 'idle') AND harness != '' "
+            "ORDER BY updated_at DESC",
         ).fetchall()
         return [self._row_to_channel(r) for r in rows]
 

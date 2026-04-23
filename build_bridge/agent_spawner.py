@@ -345,16 +345,21 @@ class AgentSpawner:
 
         DB values win over the live worker's args — the user may have
         updated harness / model / working directory via the edit modal
-        after the worker was spawned."""
+        after the worker was spawned.
+
+        A channel row with an empty harness is a config-only stub (created
+        so settings updates can persist) and has nothing to spawn; treat it
+        like a missing channel."""
         worker = self._workers.get(channel_id)
         channel = self._store.get_channel(channel_id)
 
-        if not worker and not channel:
+        has_db = channel is not None and bool(channel.harness)
+        if not has_db and not worker:
             return None
 
-        harness = channel.harness if channel else worker.harness
-        model = channel.model if channel else worker.model
-        system_prompt = channel.system_prompt if channel else worker.system_prompt
+        harness = channel.harness if has_db else worker.harness
+        model = channel.model if has_db else worker.model
+        system_prompt = channel.system_prompt if has_db else worker.system_prompt
         working_directory = channel.working_directory if channel else (worker.working_directory if worker else "")
 
         return await self.spawn(
@@ -471,9 +476,10 @@ class AgentSpawner:
 
     async def _auto_restart(self, channel_id: str, backoff: float) -> None:
         await asyncio.sleep(backoff)
-        # Channel may have been deleted during backoff.
+        # Channel may have been deleted during backoff. Stubs (empty harness)
+        # have nothing to spawn either — bail out the same way.
         channel = self._store.get_channel(channel_id)
-        if not channel:
+        if not channel or not channel.harness:
             self._restart_state.pop(channel_id, None)
             return
         try:

@@ -122,6 +122,17 @@ async def async_main(
         await agent_server.start()
         log.info("Agent server ready on port %s", agent_port)
 
+        # Backfill agent_channels stub rows for any channels in the e2ee
+        # MessageStore that don't have one yet. Stubs are what let edit-modal
+        # saves persist on channels that never spawned an agent.
+        stubbed = 0
+        for c in store.list_channels():
+            if agent_store.get_channel(c.id) is None:
+                agent_store.ensure_channel_row(c.id)
+                stubbed += 1
+        if stubbed:
+            log.info("Backfilled agent_channels stubs for %d channel(s)", stubbed)
+
         # If the previous daemon exited via `--keep-agents`, adopt the
         # surviving agent processes from the snapshot instead of spawning
         # fresh ones. Consume the env var so a subsequent crash-restart

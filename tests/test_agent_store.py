@@ -61,6 +61,46 @@ class TestChannels:
         assert len(active) == 1
         assert active[0].id == "ch_1"
 
+    def test_ensure_channel_row_creates_stub(self, store: AgentStore):
+        assert store.get_channel("ch_new") is None
+        store.ensure_channel_row("ch_new")
+        ch = store.get_channel("ch_new")
+        assert ch is not None
+        assert ch.id == "ch_new"
+        assert ch.agent_id == ""
+        assert ch.harness == ""
+        assert ch.model == ""
+        assert ch.status == "idle"
+        assert ch.auto_approve_tools is False
+
+    def test_ensure_channel_row_is_idempotent(self, store: AgentStore):
+        store.ensure_channel_row("ch_new")
+        store.ensure_channel_row("ch_new")
+        assert store.get_channel("ch_new") is not None
+
+    def test_ensure_channel_row_does_not_overwrite_real_row(self, store: AgentStore):
+        store.create_channel("ch_1", "agt_1", "claude-code", "claude-sonnet")
+        store.ensure_channel_row("ch_1")
+        ch = store.get_channel("ch_1")
+        assert ch.agent_id == "agt_1"
+        assert ch.harness == "claude-code"
+        assert ch.model == "claude-sonnet"
+        assert ch.status == "active"
+
+    def test_list_resumable_channels_excludes_stubs(self, store: AgentStore):
+        store.create_channel("ch_real", "agt_1", "claude-code", "claude-sonnet")
+        store.ensure_channel_row("ch_stub")
+        resumable = store.list_resumable_channels()
+        ids = {c.id for c in resumable}
+        assert "ch_real" in ids
+        assert "ch_stub" not in ids
+
+    def test_update_working_directory_persists_on_stub(self, store: AgentStore):
+        store.ensure_channel_row("ch_stub")
+        store.update_working_directory("ch_stub", "/tmp/project")
+        ch = store.get_channel("ch_stub")
+        assert ch.working_directory == "/tmp/project"
+
     def test_touch_channel_updates_timestamp(self, store: AgentStore):
         ch = store.create_channel("ch_1", "agt_1", "claude-code", "claude-sonnet")
         original_updated = ch.updated_at

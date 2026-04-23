@@ -364,6 +364,11 @@ class E2EEHandler:
         channel = self.store.create_channel(channel_id, name)
         log.info("Created channel: %s (%s)", name, channel_id[:8])
 
+        # Ensure an agent_channels stub exists from the moment the channel is
+        # born, so later settings edits always have a row to UPDATE.
+        if self._agent_server:
+            self._agent_server.store.ensure_channel_row(channel_id)
+
         response: dict[str, Any] = {
             "action": "channel_created",
             "channel": {
@@ -456,6 +461,12 @@ class E2EEHandler:
                 payload={"action": "error", "error": "channel_id required"},
             )
             return
+
+        # Guarantee an agent_channels row exists before any UPDATE runs.
+        # Channels created before the stub-on-create change (or created via
+        # paths that skipped auto-spawn) would otherwise silently no-op.
+        if self._agent_server:
+            self._agent_server.store.ensure_channel_row(channel_id)
 
         working_directory = payload.get("working_directory")
         if working_directory is not None and self._agent_server:

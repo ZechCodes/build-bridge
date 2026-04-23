@@ -196,6 +196,13 @@ class TestRestart:
         result = await spawner.restart("ch_nonexistent")
         assert result is None
 
+    async def test_restart_stub_returns_none(self, spawner, store):
+        """A config-only stub row has no harness — restart should bail out,
+        not crash trying to spawn with harness=''."""
+        store.ensure_channel_row("ch_stub")
+        result = await spawner.restart("ch_stub")
+        assert result is None
+
 
 class TestListWorkers:
     async def test_list_empty(self, spawner):
