@@ -325,6 +325,18 @@ class E2EEHandler:
                     entry["plan_mode"] = agent_ch.plan_mode
                     entry["auto_approve_tools"] = agent_ch.auto_approve_tools
                     entry["last_seen_at"] = agent_ch.last_seen_at
+                    # Authoritative running flag: worker subprocess is
+                    # alive AND the agent is mid-turn (status flips to
+                    # 'idle' on activity.end{complete|waiting},
+                    # 'error' on activity.end{error}). The browser
+                    # reconciles presenceStore from this on every
+                    # channel_list response — covers SSE blips and
+                    # tab-focus resyncs without per-event plumbing.
+                    entry["is_running"] = bool(
+                        self._agent_spawner
+                        and self._agent_spawner.is_running(c.id)
+                        and agent_ch.status == "active"
+                    )
             channel_list.append(entry)
         await self._send_frame(
             session, ws,
