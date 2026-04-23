@@ -596,6 +596,16 @@ class AgentStore:
         )
         self.db.commit()
 
+    def update_harness(self, channel_id: str, harness: str) -> None:
+        """Update a channel's harness. The agent must be restarted for
+        the change to take effect — harness determines which binary
+        the spawner launches."""
+        self.db.execute(
+            "UPDATE agent_channels SET harness = ?, updated_at = ? WHERE id = ?",
+            (harness, now_iso(), channel_id),
+        )
+        self.db.commit()
+
     def mark_channel_seen(self, channel_id: str) -> str:
         """Mark a channel as seen by the user. Returns the timestamp."""
         now = now_iso()

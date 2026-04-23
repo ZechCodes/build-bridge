@@ -341,19 +341,20 @@ class AgentSpawner:
     # -----------------------------------------------------------------
 
     async def restart(self, channel_id: str) -> WorkerInfo | None:
-        """Restart the agent on a channel using its stored config."""
-        worker = self._workers.get(channel_id)
+        """Restart the agent on a channel using its stored config.
 
-        # Always read working_directory from DB — user may have updated it
-        # via the edit modal after the worker was spawned.
+        DB values win over the live worker's args — the user may have
+        updated harness / model / working directory via the edit modal
+        after the worker was spawned."""
+        worker = self._workers.get(channel_id)
         channel = self._store.get_channel(channel_id)
 
         if not worker and not channel:
             return None
 
-        harness = worker.harness if worker else channel.harness
-        model = worker.model if worker else channel.model
-        system_prompt = worker.system_prompt if worker else channel.system_prompt
+        harness = channel.harness if channel else worker.harness
+        model = channel.model if channel else worker.model
+        system_prompt = channel.system_prompt if channel else worker.system_prompt
         working_directory = channel.working_directory if channel else (worker.working_directory if worker else "")
 
         return await self.spawn(

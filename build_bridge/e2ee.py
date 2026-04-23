@@ -472,6 +472,18 @@ class E2EEHandler:
             self._agent_server.store.update_effort(channel_id, effort)
             log.info("Updated effort for channel %s to %s", channel_id[:8], effort)
 
+        harness_changed = False
+        harness = payload.get("harness")
+        if harness and self._agent_server:
+            current = self._agent_server.store.get_channel(channel_id)
+            if current is not None and current.harness != harness:
+                self._agent_server.store.update_harness(channel_id, harness)
+                harness_changed = True
+                log.info(
+                    "Updated harness for channel %s to %s",
+                    channel_id[:8], harness,
+                )
+
         auto_approve_changed = False
         auto_approve_tools = payload.get("auto_approve_tools")
         if auto_approve_tools is not None and self._agent_server:
@@ -493,12 +505,15 @@ class E2EEHandler:
                 "working_directory": working_directory,
                 "model": model,
                 "effort": effort,
+                "harness": harness,
                 "auto_approve_tools": auto_approve_tools,
             },
         )
 
         # Emit setting-change markers so the browser shows what changed.
         changes: list[str] = []
+        if harness_changed:
+            changes.append(f"Harness → {harness}")
         if model:
             changes.append(f"Model → {model}")
         if effort is not None:
@@ -512,15 +527,15 @@ class E2EEHandler:
                 session, ws, channel_id, " · ".join(changes),
             )
 
-        # Restart the agent so the new auto_approve_tools setting takes
-        # effect — the flag is read once at spawn time (both for
-        # approvalPolicy on Codex and permission_mode on Claude), so a
-        # live change requires a fresh process.
-        if auto_approve_changed and self._agent_spawner:
+        # Restart the agent whenever a setting that only takes effect at
+        # spawn time is changed. harness controls which binary to launch;
+        # auto_approve_tools is read once at spawn for approvalPolicy
+        # (Codex) / permission_mode (Claude).
+        if (harness_changed or auto_approve_changed) and self._agent_spawner:
             try:
                 await self._agent_spawner.restart(channel_id)
             except Exception:
-                log.exception("Failed to restart agent after auto_approve_tools change")
+                log.exception("Failed to restart agent after channel update")
 
     async def _delete_channel(
         self,
