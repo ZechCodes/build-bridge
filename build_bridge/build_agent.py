@@ -261,50 +261,83 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
         # --- Interactive tool interception ---
 
         if tool_name == "AskUserQuestion":
-            # AskUserQuestion uses "questions" (plural) — an array of question
-            # objects, each with: question, header, options, multiSelect.
+            # AskUserQuestion takes `questions` — an array of question
+            # objects each with: question, header, options, multiSelect.
+            # We ask them ONE AT A TIME (each a separate interaction card
+            # in the UI) rather than flattening everything into one card
+            # with a big pool of cross-cutting options. Previously the
+            # UI showed all options as siblings under a merged prompt,
+            # which made it impossible to tell which button answered
+            # which question without reading the whole body. Stepping
+            # through them keeps each question visually scoped to its
+            # own options and lets the user commit one decision at a
+            # time.
             questions_raw = tool_input.get("questions", [])
             if not questions_raw:
                 questions_raw = [tool_input]
 
-            question_parts = []
-            options = []
-            for q in questions_raw:
-                header = q.get("header", "")
-                qtext = q.get("question", "")
-                if header and qtext:
-                    question_parts.append(f"**{header}**: {qtext}")
-                elif qtext:
-                    question_parts.append(qtext)
-
-                for opt in q.get("options", []):
+            def _shape_options(q_opts):
+                out = []
+                for opt in q_opts:
                     if isinstance(opt, dict):
                         label = opt.get("label", "")
                         desc = opt.get("description", "")
-                        opt_id = label
                         display = f"{label} — {desc}" if desc else label
-                        options.append({"id": opt_id, "label": display})
+                        out.append({"id": label, "label": display})
                     elif isinstance(opt, str):
-                        options.append({"id": opt, "label": opt})
+                        out.append({"id": opt, "label": opt})
+                return out
 
-            question = "\n\n".join(question_parts)
-            log.info("Intercepting AskUserQuestion: %s (%d options)", question[:80], len(options))
+            log.info("Intercepting AskUserQuestion: %d question(s)", len(questions_raw))
 
-            result = await wrapper.request_interaction(
-                interaction_id=f"int_{uuid.uuid4().hex[:16]}",
-                question=question,
-                kind="question",
-                options=options,
-                allow_freeform=True,
-            )
-            if result.get("cancelled"):
-                reason = "Question cancelled — the user sent a new message. Read it with read_unread."
-            else:
+            answers = []
+            total = len(questions_raw)
+            for idx, q in enumerate(questions_raw, start=1):
+                header = q.get("header", "")
+                qtext = q.get("question", "")
+                opts = _shape_options(q.get("options", []))
+
+                # Compose the step's question body. Add a "(step N / M)"
+                # hint when there are multiple, so the user knows more
+                # are coming.
+                body_parts = []
+                if total > 1:
+                    body_parts.append(f"*({idx} of {total})*")
+                if header and qtext:
+                    body_parts.append(f"**{header}**: {qtext}")
+                elif header:
+                    body_parts.append(f"**{header}**")
+                elif qtext:
+                    body_parts.append(qtext)
+                step_question = "\n\n".join(body_parts) or header or qtext or "Question"
+
+                result = await wrapper.request_interaction(
+                    interaction_id=f"int_{uuid.uuid4().hex[:16]}",
+                    question=step_question,
+                    kind="question",
+                    options=opts,
+                    allow_freeform=True,
+                )
+                if result.get("cancelled"):
+                    return {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": (
+                                "Question cancelled — the user sent a new message. "
+                                "Read it with read_unread."
+                            ),
+                        },
+                    }
                 answer = result.get("freeform_response") or result.get("selected_option", "")
-                reason = f"User answered: {answer}"
+                answers.append((header or qtext or f"Q{idx}", answer))
 
-            # Use permissionDecision: deny with the answer as reason.
-            # Claude sees the deny reason as the tool result.
+            if total == 1:
+                reason = f"User answered: {answers[0][1]}"
+            else:
+                lines = [f"- {h}: {a}" for h, a in answers]
+                reason = "User answered:\n" + "\n".join(lines)
+
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",

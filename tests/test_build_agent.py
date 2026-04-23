@@ -161,6 +161,72 @@ class TestPreToolHook:
         tool_events = [b for b in broadcast_log if b[1].get("event_type") == "tool.use"]
         assert len(tool_events) == 0
 
+    async def test_ask_user_question_splits_per_question(self, wrapper):
+        """Multi-question AskUserQuestion fires one request_interaction per
+        question (so each becomes its own UI card), collects answers, and
+        returns them as a structured deny-reason for Claude."""
+        hook = make_pre_tool_hook(wrapper)
+
+        calls = []
+        answers_queue = [
+            {"selected_option": "Everything"},
+            {"selected_option": "Rename to authors.md"},
+            {"selected_option": "Keep both"},
+        ]
+
+        async def fake_request(**kwargs):
+            calls.append(kwargs)
+            return answers_queue.pop(0)
+        wrapper.request_interaction = fake_request   # type: ignore[method-assign]
+
+        result = await hook({
+            "tool_name": "AskUserQuestion",
+            "tool_input": {
+                "questions": [
+                    {"header": "Scope",   "question": "What scope?",
+                     "options": [{"label": "Everything"}, {"label": "Only asks"}]},
+                    {"header": "Plan",    "question": "Rename authors.md?",
+                     "options": [{"label": "Rename to authors.md"}, {"label": "Leave"}]},
+                    {"header": "Old sys", "question": "Delete?",
+                     "options": [{"label": "Delete"}, {"label": "Keep both"}]},
+                ],
+            },
+        }, "tu_ask_1", {})
+
+        assert len(calls) == 3, f"expected 3 interactions, got {len(calls)}"
+        # Each call scopes its options to its own question.
+        assert [c["options"][0]["id"] for c in calls] == ["Everything", "Rename to authors.md", "Delete"]
+        # Step hint is included when there are multiple questions.
+        assert "(1 of 3)" in calls[0]["question"]
+        assert "(3 of 3)" in calls[2]["question"]
+
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "User answered" in reason
+        assert "- Scope: Everything" in reason
+        assert "- Plan: Rename to authors.md" in reason
+        assert "- Old sys: Keep both" in reason
+
+    async def test_ask_user_question_single_stays_simple(self, wrapper):
+        """A single-question AskUserQuestion keeps the old 'User answered: X'
+        reason format (no step hint, no bullet list)."""
+        hook = make_pre_tool_hook(wrapper)
+
+        async def fake_request(**kwargs):
+            return {"selected_option": "Yes"}
+        wrapper.request_interaction = fake_request   # type: ignore[method-assign]
+
+        result = await hook({
+            "tool_name": "AskUserQuestion",
+            "tool_input": {
+                "questions": [
+                    {"header": "Go", "question": "Proceed?", "options": [{"label": "Yes"}, {"label": "No"}]},
+                ],
+            },
+        }, "tu_ask_single", {})
+
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert reason == "User answered: Yes"
+
 
 class TestPostToolHook:
     async def test_emits_tool_result(self, wrapper, broadcast_log):
