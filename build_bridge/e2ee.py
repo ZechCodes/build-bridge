@@ -2460,6 +2460,12 @@ class E2EEHandler:
                 "total_size": total_size,
                 "total_chunks": payload.get("total_chunks", 1),
                 "channel_id": channel_id,
+                # Optional: destination directory relative to the
+                # channel's working_directory. When set, the assembled
+                # file lands in the workspace instead of the scratch
+                # uploads registry. Sanitised + path-safety checked
+                # at upload_complete time.
+                "dest_dir": payload.get("dest_dir", "") or "",
             }
             meta_path.write_text(json.dumps(meta))
 
@@ -2529,10 +2535,38 @@ class E2EEHandler:
             })
             return
 
-        # Write assembled file to final location.
-        final_dir = self._upload_final_dir(channel_id, file_id)
-        final_dir.mkdir(parents=True, exist_ok=True)
-        final_path = final_dir / filename
+        # Choose destination: if the client specified a dest_dir,
+        # land the file inside the channel's working directory.
+        # Otherwise keep the legacy scratch-uploads path.
+        dest_dir = (meta.get("dest_dir") or "").strip()
+        final_path: Path
+        if dest_dir:
+            cwd = self._get_channel_cwd(channel_id)
+            resolved = self._resolve_safe_path(cwd, os.path.join(dest_dir, filename))
+            if resolved is None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                await self._send_frame(session, ws, payload={
+                    "action": "upload_error",
+                    "file_id": file_id,
+                    "error": "destination outside workspace",
+                })
+                return
+            final_path = Path(resolved)
+            if final_path.exists():
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                await self._send_frame(session, ws, payload={
+                    "action": "upload_error",
+                    "file_id": file_id,
+                    "error": "file exists",
+                    "path": str(final_path),
+                })
+                return
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            final_dir = self._upload_final_dir(channel_id, file_id)
+            final_dir.mkdir(parents=True, exist_ok=True)
+            final_path = final_dir / filename
+
         final_path.write_bytes(assembled)
 
         # Clean up temp.
