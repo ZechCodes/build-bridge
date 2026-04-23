@@ -263,15 +263,11 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
         if tool_name == "AskUserQuestion":
             # AskUserQuestion takes `questions` — an array of question
             # objects each with: question, header, options, multiSelect.
-            # We ask them ONE AT A TIME (each a separate interaction card
-            # in the UI) rather than flattening everything into one card
-            # with a big pool of cross-cutting options. Previously the
-            # UI showed all options as siblings under a merged prompt,
-            # which made it impossible to tell which button answered
-            # which question without reading the whole body. Stepping
-            # through them keeps each question visually scoped to its
-            # own options and lets the user commit one decision at a
-            # time.
+            # We send the structured array to the client as a single
+            # interaction_request; the client renders it as a paginated
+            # card (one question per step with Back/Next/Submit) and
+            # returns `step_answers` in the response. Claude sees one
+            # consolidated tool result at the end.
             questions_raw = tool_input.get("questions", [])
             if not questions_raw:
                 questions_raw = [tool_input]
@@ -288,55 +284,60 @@ def make_pre_tool_hook(wrapper: AgentWrapper):
                         out.append({"id": opt, "label": opt})
                 return out
 
-            log.info("Intercepting AskUserQuestion: %d question(s)", len(questions_raw))
+            shaped_questions = []
+            for q in questions_raw:
+                shaped_questions.append({
+                    "header": q.get("header", ""),
+                    "question": q.get("question", ""),
+                    "options": _shape_options(q.get("options", [])),
+                    "multiselect": bool(q.get("multiSelect") or q.get("multiselect")),
+                })
 
-            answers = []
-            total = len(questions_raw)
-            for idx, q in enumerate(questions_raw, start=1):
-                header = q.get("header", "")
-                qtext = q.get("question", "")
-                opts = _shape_options(q.get("options", []))
+            # Back-compat single-question summary for clients that don't
+            # yet render the paginated UI — still show something useful.
+            summary_parts = []
+            fallback_options: list[dict[str, Any]] = []
+            for q in shaped_questions:
+                if q["header"] and q["question"]:
+                    summary_parts.append(f"**{q['header']}**: {q['question']}")
+                elif q["question"]:
+                    summary_parts.append(q["question"])
+                fallback_options.extend(q["options"])
+            summary_question = "\n\n".join(summary_parts) or "Question"
 
-                # Compose the step's question body. Add a "(step N / M)"
-                # hint when there are multiple, so the user knows more
-                # are coming.
-                body_parts = []
-                if total > 1:
-                    body_parts.append(f"*({idx} of {total})*")
-                if header and qtext:
-                    body_parts.append(f"**{header}**: {qtext}")
-                elif header:
-                    body_parts.append(f"**{header}**")
-                elif qtext:
-                    body_parts.append(qtext)
-                step_question = "\n\n".join(body_parts) or header or qtext or "Question"
+            log.info("Intercepting AskUserQuestion: %d question(s)", len(shaped_questions))
 
-                result = await wrapper.request_interaction(
-                    interaction_id=f"int_{uuid.uuid4().hex[:16]}",
-                    question=step_question,
-                    kind="question",
-                    options=opts,
-                    allow_freeform=True,
-                )
-                if result.get("cancelled"):
-                    return {
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": (
-                                "Question cancelled — the user sent a new message. "
-                                "Read it with read_unread."
-                            ),
-                        },
-                    }
-                answer = result.get("freeform_response") or result.get("selected_option", "")
-                answers.append((header or qtext or f"Q{idx}", answer))
+            result = await wrapper.request_interaction(
+                interaction_id=f"int_{uuid.uuid4().hex[:16]}",
+                question=summary_question,
+                kind="question",
+                options=fallback_options,
+                allow_freeform=True,
+                questions=shaped_questions if len(shaped_questions) > 1 else None,
+            )
 
-            if total == 1:
-                reason = f"User answered: {answers[0][1]}"
-            else:
-                lines = [f"- {h}: {a}" for h, a in answers]
+            if result.get("cancelled"):
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": (
+                            "Question cancelled — the user sent a new message. "
+                            "Read it with read_unread."
+                        ),
+                    },
+                }
+
+            step_answers = result.get("step_answers")
+            if step_answers:
+                lines = [
+                    f"- {a.get('header') or a.get('question') or f'Q{i+1}'}: {a.get('answer', '')}"
+                    for i, a in enumerate(step_answers)
+                ]
                 reason = "User answered:\n" + "\n".join(lines)
+            else:
+                answer = result.get("freeform_response") or result.get("selected_option", "")
+                reason = f"User answered: {answer}"
 
             return {
                 "hookSpecificOutput": {

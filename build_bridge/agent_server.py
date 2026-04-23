@@ -262,8 +262,14 @@ class AgentServer:
         selected_option: str | None,
         freeform_response: str | None,
         selected_options: list[str] | None = None,
+        step_answers: list[dict[str, Any]] | None = None,
     ) -> bool:
-        """Forward an interaction response to the agent on a channel."""
+        """Forward an interaction response to the agent on a channel.
+
+        For paginated multi-question interactions, ``step_answers`` is a
+        list of {header, answer} in the same order as the request's
+        ``questions`` array.
+        """
         agent_id = self._channel_to_agent.get(channel_id)
         if not agent_id:
             return False
@@ -271,12 +277,15 @@ class AgentServer:
         if not agent:
             return False
 
-        envelope = make_envelope(INTERACTION_RESPONSE, {
+        payload: dict[str, Any] = {
             "interaction_id": interaction_id,
             "selected_option": selected_option,
             "freeform_response": freeform_response,
             "selected_options": selected_options,
-        })
+        }
+        if step_answers:
+            payload["step_answers"] = step_answers
+        envelope = make_envelope(INTERACTION_RESPONSE, payload)
         try:
             await agent.ws.send(json.dumps(envelope))
             log.info("Sent interaction.response to agent %s (interaction=%s)", agent_id[:8], interaction_id[:12])

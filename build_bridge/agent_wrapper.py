@@ -472,9 +472,15 @@ class AgentWrapper:
         allow_freeform: bool = True,
         plan: str | None = None,
         multiselect: bool = False,
+        questions: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Emit interaction.request — agent is asking the user a question."""
-        envelope = make_envelope(INTERACTION_REQUEST, {
+        """Emit interaction.request — agent is asking the user a question.
+
+        When `questions` is a list of {header, question, options} the
+        client renders the card as a paginated stepper and returns a
+        `step_answers` array in the response.
+        """
+        payload: dict[str, Any] = {
             "interaction_id": interaction_id,
             "kind": kind,
             "question": question,
@@ -482,7 +488,10 @@ class AgentWrapper:
             "allow_freeform": allow_freeform,
             "plan": plan,
             "multiselect": multiselect,
-        })
+        }
+        if questions:
+            payload["questions"] = questions
+        envelope = make_envelope(INTERACTION_REQUEST, payload)
         await self._send(envelope)
 
     async def emit_system_message(self, text: str) -> None:
@@ -551,6 +560,7 @@ class AgentWrapper:
         allow_freeform: bool = True,
         plan: str | None = None,
         multiselect: bool = False,
+        questions: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Emit interaction request and block until the user responds.
 
@@ -558,6 +568,8 @@ class AgentWrapper:
         sends a new message, the agent disconnects, or shutdown is requested.
         Returns dict with ``selected_option`` and/or ``freeform_response``.
         For multiselect interactions, returns ``selected_options`` (list).
+        When ``questions`` is provided, the response dict also includes
+        ``step_answers`` (list of {header, answer}).
         """
         event = asyncio.Event()
         result: dict[str, Any] = {}
@@ -566,7 +578,7 @@ class AgentWrapper:
         try:
             await self.emit_interaction_request(
                 interaction_id, question, kind, options, allow_freeform, plan,
-                multiselect,
+                multiselect, questions=questions,
             )
             await event.wait()
             return result

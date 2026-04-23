@@ -161,22 +161,24 @@ class TestPreToolHook:
         tool_events = [b for b in broadcast_log if b[1].get("event_type") == "tool.use"]
         assert len(tool_events) == 0
 
-    async def test_ask_user_question_splits_per_question(self, wrapper):
-        """Multi-question AskUserQuestion fires one request_interaction per
-        question (so each becomes its own UI card), collects answers, and
-        returns them as a structured deny-reason for Claude."""
+    async def test_ask_user_question_passes_questions_for_pagination(self, wrapper):
+        """Multi-question AskUserQuestion sends ONE interaction_request
+        carrying the structured `questions` array so the client can
+        render a paginated stepper. Response's `step_answers` is turned
+        into a bullet-list deny-reason for Claude."""
         hook = make_pre_tool_hook(wrapper)
 
-        calls = []
-        answers_queue = [
-            {"selected_option": "Everything"},
-            {"selected_option": "Rename to authors.md"},
-            {"selected_option": "Keep both"},
-        ]
+        captured: dict[str, object] = {}
 
         async def fake_request(**kwargs):
-            calls.append(kwargs)
-            return answers_queue.pop(0)
+            captured.update(kwargs)
+            return {
+                "step_answers": [
+                    {"header": "Scope",   "question": "What scope?",     "answer": "Everything"},
+                    {"header": "Plan",    "question": "Rename authors?", "answer": "Rename to authors.md"},
+                    {"header": "Old sys", "question": "Delete?",         "answer": "Keep both"},
+                ],
+            }
         wrapper.request_interaction = fake_request   # type: ignore[method-assign]
 
         result = await hook({
@@ -193,25 +195,32 @@ class TestPreToolHook:
             },
         }, "tu_ask_1", {})
 
-        assert len(calls) == 3, f"expected 3 interactions, got {len(calls)}"
-        # Each call scopes its options to its own question.
-        assert [c["options"][0]["id"] for c in calls] == ["Everything", "Rename to authors.md", "Delete"]
-        # Step hint is included when there are multiple questions.
-        assert "(1 of 3)" in calls[0]["question"]
-        assert "(3 of 3)" in calls[2]["question"]
+        # One single call.
+        assert "questions" in captured, "questions array must be forwarded"
+        questions = captured["questions"]
+        assert isinstance(questions, list) and len(questions) == 3
+        assert [q["header"] for q in questions] == ["Scope", "Plan", "Old sys"]
+        assert questions[0]["options"][0]["id"] == "Everything"
+
+        # Fallback summary + flat options still populated for back-compat.
+        assert "**Scope**" in captured["question"]
+        assert any(o["id"] == "Keep both" for o in captured["options"])
 
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-        assert "User answered" in reason
+        assert reason.startswith("User answered:\n")
         assert "- Scope: Everything" in reason
         assert "- Plan: Rename to authors.md" in reason
         assert "- Old sys: Keep both" in reason
 
     async def test_ask_user_question_single_stays_simple(self, wrapper):
         """A single-question AskUserQuestion keeps the old 'User answered: X'
-        reason format (no step hint, no bullet list)."""
+        reason format — no step_answers needed."""
         hook = make_pre_tool_hook(wrapper)
 
+        captured: dict[str, object] = {}
+
         async def fake_request(**kwargs):
+            captured.update(kwargs)
             return {"selected_option": "Yes"}
         wrapper.request_interaction = fake_request   # type: ignore[method-assign]
 
@@ -224,6 +233,8 @@ class TestPreToolHook:
             },
         }, "tu_ask_single", {})
 
+        # Single question → `questions` kwarg left None (no pagination UI).
+        assert captured.get("questions") is None
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
         assert reason == "User answered: Yes"
 
