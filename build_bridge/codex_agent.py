@@ -834,7 +834,7 @@ class CodexHarnessRuntime:
         if any(kw.lower() in msg_lower for kw in auth_keywords):
             await self.wrapper._send_error(
                 code="auth_expired",
-                message="OpenAI authentication expired. Run `codex auth` in your terminal to sign in again.",
+                message="OpenAI authentication expired. Sign in again on the device and try the message again.",
                 fatal=True,
             )
             return
