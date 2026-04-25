@@ -290,6 +290,20 @@ class TestActivity:
             ch = store.get_channel(channel_id)
             assert ch.status == "idle"
 
+    async def test_cancelled_activity_end_updates_status(self, server, store, broadcast_log):
+        srv, port = server
+        async with ws_connect(f"ws://127.0.0.1:{port}") as ws:
+            await ws.send(json.dumps(_hello_envelope()))
+            configured = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            channel_id = configured["payload"]["channel_id"]
+
+            end = make_envelope(ACTIVITY_END, {"reason": "cancelled"})
+            await ws.send(json.dumps(end))
+            await asyncio.sleep(0.1)
+
+            ch = store.get_channel(channel_id)
+            assert ch.status == "idle"
+
 
 class TestToolUse:
     async def test_tool_use_and_result_stored(self, server, store, broadcast_log):

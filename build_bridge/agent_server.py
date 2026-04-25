@@ -925,7 +925,7 @@ class AgentServer:
         )
 
         # Update channel status based on reason.
-        if reason in ("complete", "waiting"):
+        if reason in ("complete", "waiting", "cancelled"):
             self.store.update_channel_status(agent.channel_id, "idle")
         elif reason == "error":
             self.store.update_channel_status(agent.channel_id, "error")

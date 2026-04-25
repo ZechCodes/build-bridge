@@ -1136,6 +1136,8 @@ async def run_agent(
                             log.warning("Initial query force-cancelled, recreating client")
                             await wrapper.emit_activity_end("cancelled")
                             exit_reason = "cancelled"
+                    else:
+                        await wrapper.emit_activity_end("waiting")
 
                     # Message loop — wait for user messages and inject them.
                     while exit_reason == "context_ended":

@@ -8,11 +8,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
 import time
 import uuid
+from hashlib import sha1
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +82,39 @@ def _render_plan_text(explanation: str | None, plan: list[dict[str, Any]]) -> st
         }.get(status, "[ ]")
         lines.append(f"{status_text} {step.get('step', '')}".rstrip())
     return "\n".join(lines).strip()
+
+
+def _extract_proposed_plan_text(text: str) -> str | None:
+    """Return plan text from Codex's proposed-plan chat markup, if present."""
+    if "<proposed_plan" not in text:
+        return None
+
+    match = re.search(
+        r"<proposed_plan[^>]*>(?P<plan>.*?)(?:</proposed_plan>|$)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return None
+
+    plan = match.group("plan").strip()
+    return plan or None
+
+
+def _turn_id_from_params(params: dict[str, Any]) -> str | None:
+    """Extract a Codex turn id across app-server notification shapes."""
+    for key in ("turnId", "turn_id"):
+        value = params.get(key)
+        if value:
+            return str(value)
+
+    turn = params.get("turn")
+    if isinstance(turn, dict):
+        for key in ("id", "turnId", "turn_id"):
+            value = turn.get(key)
+            if value:
+                return str(value)
+    return None
 
 
 def _codex_input(text: str) -> list[dict[str, Any]]:
@@ -287,6 +322,7 @@ class CodexHarnessRuntime:
         self.plan_mode = False
         self.latest_plan_text: str | None = None
         self.latest_plan_turn_id: str | None = None
+        self._last_plan_review_key: str | None = None
         self._plan_review_task: asyncio.Task | None = None
         self._tool_outputs: dict[str, list[str]] = {}
         self._tool_names: dict[str, str] = {}
@@ -304,6 +340,29 @@ class CodexHarnessRuntime:
         # terminal `agentMessage` content as the chat response so the user
         # sees Codex's reply even when the model skips the tool call.
         self._turn_used_send: bool = False
+        self._install_plan_send_interceptor()
+
+    def _install_plan_send_interceptor(self) -> None:
+        """Capture Codex proposed-plan sends before they become chat messages."""
+        chat_mcp = getattr(self.wrapper, "chat_mcp", None)
+        if chat_mcp is None or getattr(chat_mcp, "_build_codex_plan_intercept", False):
+            return
+
+        original_on_send = getattr(chat_mcp, "_on_send", None)
+
+        async def on_send(message: str, suggested_actions: list[str] | None = None) -> None:
+            plan = _extract_proposed_plan_text(message)
+            if plan:
+                self.latest_plan_text = plan
+                self.latest_plan_turn_id = self.turn_id
+                self.plan_mode = True
+                log.info("Captured Codex proposed_plan send for plan review (%d chars)", len(plan))
+                return
+            if original_on_send:
+                await original_on_send(message, suggested_actions)
+
+        chat_mcp._on_send = on_send
+        chat_mcp._build_codex_plan_intercept = True
 
     async def run(self) -> None:
         self._register_handlers()
@@ -360,6 +419,7 @@ class CodexHarnessRuntime:
             await self._start_or_steer(initial)
         else:
             await self.wrapper.emit_system_message("Agent is ready.")
+            await self.wrapper.emit_activity_end("waiting")
 
         ping_task = asyncio.create_task(self._ping_loop())
         watchdog_task = asyncio.create_task(self._hang_watchdog_loop())
@@ -475,7 +535,7 @@ class CodexHarnessRuntime:
         text = "\n\n".join(part for part in parts if part).strip()
         return text or None
 
-    async def _start_or_steer(self, text: str) -> None:
+    async def _start_or_steer(self, text: str, *, force_default_mode: bool = False) -> None:
         if not self.thread_id:
             return
 
@@ -515,6 +575,11 @@ class CodexHarnessRuntime:
         if self.plan_mode:
             params["collaborationMode"] = {
                 "mode": "plan",
+                "settings": {"model": self.model},
+            }
+        elif force_default_mode:
+            params["collaborationMode"] = {
+                "mode": "default",
                 "settings": {"model": self.model},
             }
 
@@ -614,22 +679,34 @@ class CodexHarnessRuntime:
                 log.error("  -%.1fs raw=%r", age, message)
 
     async def _on_turn_started(self, params: dict[str, Any]) -> None:
-        turn = params.get("turn", {})
-        self.turn_id = turn.get("id")
+        self.turn_id = _turn_id_from_params(params)
         self._last_activity = time.monotonic()
         self._turn_used_send = False
 
     async def _on_turn_completed(self, params: dict[str, Any]) -> None:
         turn = params.get("turn", {})
+        completed_turn_id = _turn_id_from_params(params)
         self.turn_id = None
         self._last_activity = time.monotonic()
         self._unread_notified = False
         reason = "error" if turn.get("status") == "failed" else "waiting"
         await self.wrapper.emit_activity_end(reason)
 
-        if self.plan_mode and self.latest_plan_text and self.latest_plan_turn_id == turn.get("id"):
-            if not self._plan_review_task or self._plan_review_task.done():
-                self._plan_review_task = asyncio.create_task(self._handle_plan_review())
+        if not self.plan_mode or not self.latest_plan_text:
+            return
+
+        # Codex app-server has used more than one notification shape for turn
+        # identifiers. Plan mode only runs one active turn at a time, so the
+        # latest plan is the one that needs a review when that turn completes.
+        plan_key = (
+            f"{self.latest_plan_turn_id or completed_turn_id or 'unknown'}:"
+            f"{sha1(self.latest_plan_text.encode('utf-8')).hexdigest()}"
+        )
+        if plan_key == self._last_plan_review_key:
+            return
+        self._last_plan_review_key = plan_key
+        if not self._plan_review_task or self._plan_review_task.done():
+            self._plan_review_task = asyncio.create_task(self._handle_plan_review())
 
     async def _handle_plan_review(self) -> None:
         result = await self.wrapper.request_interaction(
@@ -649,8 +726,12 @@ class CodexHarnessRuntime:
 
         if result.get("selected_option") == "approve":
             self.plan_mode = False
+            self.wrapper.pending_plan_mode = False
             await self.wrapper.emit_state_update(plan_mode=False)
-            await self._start_or_steer("The user approved the plan. Proceed with the implementation.")
+            await self._start_or_steer(
+                "The user approved the plan. Proceed with the implementation.",
+                force_default_mode=True,
+            )
             return
 
         feedback = result.get("freeform_response") or "Revise the plan based on the user's feedback."
@@ -680,7 +761,7 @@ class CodexHarnessRuntime:
             params.get("explanation"),
             plan,
         )
-        self.latest_plan_turn_id = params.get("turnId")
+        self.latest_plan_turn_id = _turn_id_from_params(params)
 
         # Mirror Codex's plan into the same shape Claude Code's TodoWrite tool
         # uses, so the dashboard's sidebar Tasks section populates identically
@@ -752,6 +833,13 @@ class CodexHarnessRuntime:
                 self._turn_used_send, len(text), list(item.keys()),
                 json.dumps(item, default=str)[:600],
             )
+            plan = _extract_proposed_plan_text(text)
+            if plan:
+                self.latest_plan_text = plan
+                self.latest_plan_turn_id = self.turn_id
+                self.plan_mode = True
+                log.info("Captured Codex proposed_plan agentMessage for plan review (%d chars)", len(plan))
+                return
             if not self._turn_used_send and text.strip():
                 log.info(
                     "Surfacing agentMessage fallback (%d chars) — no send call this turn",
