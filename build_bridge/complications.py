@@ -78,14 +78,15 @@ class ComplicationMessage:
 # ---------------------------------------------------------------------------
 
 # Tools that mutate files and should trigger complication re-evaluation.
-FILE_MUTATION_TOOLS = frozenset({"Edit", "Write", "Bash"})
+FILE_MUTATION_TOOLS = frozenset({"Edit", "Write", "Bash", "ApplyPatch"})
 
 
 @lru_cache(maxsize=256)
 def find_git_repo(file_path: str) -> str | None:
     """Walk up from file_path to find a .git directory."""
     try:
-        p = Path(file_path).resolve()
+        expanded = os.path.expandvars(os.path.expanduser(file_path))
+        p = Path(expanded).resolve()
         # Check the path itself first, then walk up parents.
         for candidate in [p, *p.parents]:
             if (candidate / ".git").is_dir():
@@ -355,6 +356,15 @@ def extract_file_paths(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
     if tool_name == "Glob":
         path = tool_input.get("path", "")
         return [path] if path else []
+    if tool_name == "ApplyPatch":
+        paths: list[str] = []
+        for change in tool_input.get("changes", []) or []:
+            if not isinstance(change, dict):
+                continue
+            path = change.get("filePath") or change.get("path") or ""
+            if path:
+                paths.append(path)
+        return paths
     # Bash: can't reliably extract paths; caller should use working directory.
     return []
 
@@ -499,9 +509,12 @@ class ComplicationRegistry:
             if repo:
                 repos.add(repo)
 
-        # For Bash commands, try the working directory.
-        if not repos and working_directory:
-            repo = find_git_repo(working_directory)
+        # For Bash commands, prefer the command cwd when the harness provides it.
+        fallback_directory = tool_input.get("cwd") if tool_name == "Bash" else None
+        if not isinstance(fallback_directory, str) or not fallback_directory:
+            fallback_directory = working_directory
+        if not repos and fallback_directory:
+            repo = find_git_repo(fallback_directory)
             if repo:
                 repos.add(repo)
 

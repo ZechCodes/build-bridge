@@ -292,6 +292,15 @@ class TestToolMapping:
         assert tool_input["command"] == "git status"
         assert tool_input["cwd"] == "/repo"
 
+    def test_file_change_maps_to_apply_patch_with_changes(self):
+        changes = [{"filePath": "/repo/app.py", "diff": "@@ -1 +1 @@"}]
+        item = {
+            "type": "fileChange",
+            "changes": changes,
+        }
+        assert _tool_name_for_item(item) == "ApplyPatch"
+        assert _tool_input_for_item(item) == {"changes": changes}
+
     def test_dynamic_tool_result_uses_content_items(self):
         content, is_error = _tool_result_from_item(
             {

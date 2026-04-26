@@ -15,7 +15,7 @@ import pytest
 from build_bridge.complications import (
     ComplicationRegistry,
     GitStatusData,
-    FileDiffSummary,
+    find_git_repo,
     invalidate_git_repo_cache,
 )
 
@@ -29,6 +29,22 @@ def _init_git_repo(path: Path) -> None:
     (path / "README.md").write_text("hello\n")
     subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
     subprocess.run(["git", "commit", "-m", "init", "--quiet"], cwd=path, check=True)
+
+
+def test_find_git_repo_expands_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stored ~/... working directory must not resolve relative to daemon cwd."""
+    home = tmp_path / "home"
+    target_repo = home / "Projects" / "target"
+    daemon_cwd_repo = tmp_path / "daemon-cwd" / "build-bridge"
+    target_repo.mkdir(parents=True)
+    daemon_cwd_repo.mkdir(parents=True)
+    _init_git_repo(target_repo)
+    _init_git_repo(daemon_cwd_repo)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(daemon_cwd_repo)
+    invalidate_git_repo_cache()
+
+    assert find_git_repo("~/Projects/target") == str(target_repo.resolve())
 
 
 @pytest.mark.asyncio
@@ -94,6 +110,90 @@ async def test_on_filesystem_change_reuses_tracked_repos(tmp_path: Path) -> None
         await asyncio.sleep(0.05)
 
     assert broadcast.await_count >= 1
+    reg.stop_polling()
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_file_path_schedules_eval(tmp_path: Path) -> None:
+    """Codex fileChange events map to ApplyPatch with changes[].filePath."""
+    _init_git_repo(tmp_path)
+    invalidate_git_repo_cache()
+
+    broadcast = AsyncMock()
+    reg = ComplicationRegistry(broadcast=broadcast, debounce_ms=10)
+    repo_str = str(tmp_path.resolve())
+    fake_status = GitStatusData(repo=repo_str, branch="main")
+
+    with patch("build_bridge.complications.evaluate_git_status",
+               AsyncMock(return_value=fake_status)):
+        await reg.on_tool_event(
+            "ch-codex",
+            "ApplyPatch",
+            {"changes": [{"filePath": str(tmp_path / "README.md")}]},
+            "/nonexistent/dir",
+        )
+        await asyncio.sleep(0.05)
+
+    assert broadcast.await_count >= 1
+    msg = broadcast.await_args_list[0].args[1]
+    assert msg["id"] == f"git:{repo_str}"
+    assert msg["kind"] == "git-status"
+    reg.stop_polling()
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_path_schedules_eval(tmp_path: Path) -> None:
+    """Codex fileChange events can also report paths as changes[].path."""
+    _init_git_repo(tmp_path)
+    invalidate_git_repo_cache()
+
+    broadcast = AsyncMock()
+    reg = ComplicationRegistry(broadcast=broadcast, debounce_ms=10)
+    repo_str = str(tmp_path.resolve())
+    fake_status = GitStatusData(repo=repo_str, branch="main")
+
+    with patch("build_bridge.complications.evaluate_git_status",
+               AsyncMock(return_value=fake_status)):
+        await reg.on_tool_event(
+            "ch-codex-path",
+            "ApplyPatch",
+            {"changes": [{"path": str(tmp_path / "README.md")}]},
+            "/nonexistent/dir",
+        )
+        await asyncio.sleep(0.05)
+
+    assert broadcast.await_count >= 1
+    assert broadcast.await_args_list[0].args[1]["id"] == f"git:{repo_str}"
+    reg.stop_polling()
+
+
+@pytest.mark.asyncio
+async def test_bash_uses_tool_cwd_before_channel_working_directory(tmp_path: Path) -> None:
+    """Codex commandExecution includes cwd; use it for repo discovery."""
+    repo_dir = tmp_path / "repo"
+    other_dir = tmp_path / "other"
+    repo_dir.mkdir()
+    other_dir.mkdir()
+    _init_git_repo(repo_dir)
+    invalidate_git_repo_cache()
+
+    broadcast = AsyncMock()
+    reg = ComplicationRegistry(broadcast=broadcast, debounce_ms=10)
+    repo_str = str(repo_dir.resolve())
+    fake_status = GitStatusData(repo=repo_str, branch="main")
+
+    with patch("build_bridge.complications.evaluate_git_status",
+               AsyncMock(return_value=fake_status)):
+        await reg.on_tool_event(
+            "ch-bash-cwd",
+            "Bash",
+            {"command": "git status", "cwd": str(repo_dir)},
+            str(other_dir),
+        )
+        await asyncio.sleep(0.05)
+
+    assert broadcast.await_count >= 1
+    assert broadcast.await_args_list[0].args[1]["id"] == f"git:{repo_str}"
     reg.stop_polling()
 
 
