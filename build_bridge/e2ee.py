@@ -296,6 +296,8 @@ class E2EEHandler:
             await self._handle_files_list(session, payload, ws)
         elif action == "files_changes":
             await self._handle_files_changes(session, payload, ws)
+        elif action == "files_commits":
+            await self._handle_files_commits(session, payload, ws)
         elif action == "file_read":
             await self._handle_file_read(session, payload, ws)
         elif action == "file_diff":
@@ -1519,6 +1521,93 @@ class E2EEHandler:
                 continue
         return result
 
+    @staticmethod
+    def _parse_name_status(output: str) -> dict[str, str]:
+        """Parse git diff --name-status into {path: status}."""
+        result: dict[str, str] = {}
+        for line in output.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            status = parts[0]
+            path = parts[-1]
+            result[path] = status[0] if status else "M"
+        return result
+
+    def _repo_display_path(self, repo: str, cwd: str) -> str:
+        try:
+            display_path = str(Path(repo).resolve().relative_to(Path(cwd).resolve()))
+        except ValueError:
+            display_path = str(Path(repo).resolve())
+        return "." if display_path == "." else display_path
+
+    def _resolve_repo_path(self, cwd: str, repo_path: str | None) -> str | None:
+        """Resolve a repo path under cwd and confirm it is a git repo."""
+        if repo_path:
+            resolved = self._resolve_safe_path(cwd, repo_path)
+            if resolved is None:
+                return None
+            repo = find_git_repo(resolved)
+            if repo and Path(repo).resolve() == Path(resolved).resolve():
+                return repo
+            if (Path(resolved) / ".git").is_dir():
+                return str(Path(resolved).resolve())
+            return None
+        repo = find_git_repo(cwd)
+        return repo
+
+    async def _validate_commit_ref(self, repo: str, ref: str) -> str | None:
+        if ref == "HEAD":
+            return ref
+        out, ok = await _run_git(repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
+        return ref if ok and out else None
+
+    async def _repo_metadata(self, repo: str, cwd: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
+        remote, branch_info = await asyncio.gather(
+            git_remote_name(repo),
+            git_branch_info(repo),
+        )
+        branch_name, _, _ = branch_info
+        return {
+            "path": self._repo_display_path(repo, cwd),
+            "remote": remote,
+            "branch": branch_name,
+            "entries": entries,
+        }
+
+    def _change_entry(
+        self,
+        repo: str,
+        cwd: str,
+        repo_rel: str,
+        status: str,
+        ins: int,
+        dels: int,
+    ) -> dict[str, Any]:
+        repo_root = Path(repo).resolve()
+        cwd_resolved = Path(cwd).resolve()
+        abs_path = repo_root / repo_rel
+        try:
+            cwd_rel = str(abs_path.relative_to(cwd_resolved))
+        except ValueError:
+            cwd_rel = repo_rel
+        try:
+            mtime = abs_path.stat().st_mtime
+        except OSError:
+            mtime = 0
+        return {
+            "name": os.path.basename(repo_rel),
+            "path": cwd_rel,
+            "type": "file",
+            "size": 0,
+            "modified": mtime,
+            "git_status": status,
+            "staged_status": None,
+            "insertions": ins,
+            "deletions": dels,
+            "is_gitignored": False,
+        }
+
     async def _handle_files_list(
         self,
         session: ActiveSession,
@@ -1751,9 +1840,6 @@ class E2EEHandler:
 
     async def _collect_repo_changes(self, repo: str, cwd: str) -> dict[str, Any] | None:
         """Collect changed files for a single repo."""
-        repo_root = Path(repo).resolve()
-        cwd_resolved = Path(cwd).resolve()
-
         # Get repo metadata and file changes in parallel.
         results = await asyncio.gather(
             _run_git(repo, ["status", "--porcelain=v1"]),
@@ -1782,8 +1868,6 @@ class E2EEHandler:
 
         entries: list[dict[str, Any]] = []
         for repo_rel in sorted(all_paths):
-            abs_path = repo_root / repo_rel
-            # Make path relative to the repo root for display.
             staged, unstaged = status_map.get(repo_rel, (" ", " "))
             ins, dels = 0, 0
             if repo_rel in numstat_map:
@@ -1795,42 +1879,135 @@ class E2EEHandler:
                 ins += i
                 dels += d
 
-            # Path relative to CWD for file operations.
-            try:
-                cwd_rel = str(abs_path.relative_to(cwd_resolved))
-            except ValueError:
-                cwd_rel = repo_rel
-
-            try:
-                mtime = abs_path.stat().st_mtime
-            except OSError:
-                mtime = 0
-
-            entries.append({
-                "name": os.path.basename(repo_rel),
-                "path": cwd_rel,
-                "type": "file",
-                "size": 0,
-                "modified": mtime,
-                "git_status": unstaged if unstaged.strip() else None,
-                "staged_status": staged if staged.strip() else None,
-                "insertions": ins,
-                "deletions": dels,
-                "is_gitignored": False,
-            })
-
-        # Repo path relative to cwd for display.
-        try:
-            display_path = str(repo_root.relative_to(cwd_resolved))
-        except ValueError:
-            display_path = str(repo_root)
+            entry = self._change_entry(
+                repo,
+                cwd,
+                repo_rel,
+                unstaged if unstaged.strip() else (staged if staged.strip() else "M"),
+                ins,
+                dels,
+            )
+            entry["staged_status"] = staged if staged.strip() else None
+            entry["git_status"] = unstaged if unstaged.strip() else None
+            entries.append(entry)
 
         return {
-            "path": display_path,
+            "path": self._repo_display_path(repo, cwd),
             "remote": remote,
             "branch": branch_name,
             "entries": entries,
         }
+
+    async def _collect_repo_revision_changes(
+        self,
+        repo: str,
+        cwd: str,
+        newer_ref: str,
+        older_ref: str,
+    ) -> dict[str, Any]:
+        """Collect changed files for one repo between two revisions."""
+        validated_older = await self._validate_commit_ref(repo, older_ref)
+        if not validated_older:
+            meta = await self._repo_metadata(repo, cwd, [])
+            return {**meta, "newer_ref": newer_ref, "older_ref": older_ref, "error": "Invalid older ref"}
+
+        if newer_ref == "worktree":
+            diff_args = [validated_older]
+            newer_valid = "worktree"
+        else:
+            newer_valid = await self._validate_commit_ref(repo, newer_ref)
+            if not newer_valid:
+                meta = await self._repo_metadata(repo, cwd, [])
+                return {**meta, "newer_ref": newer_ref, "older_ref": older_ref, "error": "Invalid newer ref"}
+            diff_args = [validated_older, newer_valid]
+
+        name_task = _run_git(repo, ["diff", "--name-status", *diff_args])
+        numstat_task = _run_git(repo, ["diff", "--numstat", *diff_args])
+        results = await asyncio.gather(name_task, numstat_task, return_exceptions=True)
+        name_out = results[0] if not isinstance(results[0], BaseException) else ("", False)
+        numstat_out = results[1] if not isinstance(results[1], BaseException) else ("", False)
+
+        status_map = self._parse_name_status(name_out[0])
+        numstat_map = self._parse_numstat_per_file(numstat_out[0])
+
+        if newer_ref == "worktree":
+            untracked_out, _ = await _run_git(repo, ["ls-files", "--others", "--exclude-standard"])
+            for path in untracked_out.splitlines():
+                if path.strip():
+                    status_map[path] = "?"
+                    numstat_map.setdefault(path, (0, 0))
+
+        entries = []
+        for repo_rel in sorted(set(status_map) | set(numstat_map)):
+            ins, dels = numstat_map.get(repo_rel, (0, 0))
+            entries.append(self._change_entry(
+                repo,
+                cwd,
+                repo_rel,
+                status_map.get(repo_rel, "M"),
+                ins,
+                dels,
+            ))
+
+        meta = await self._repo_metadata(repo, cwd, entries)
+        return {**meta, "newer_ref": newer_ref, "older_ref": older_ref}
+
+    async def _handle_files_commits(
+        self,
+        session: ActiveSession,
+        payload: dict[str, Any],
+        ws: Any,
+    ) -> None:
+        """Return recent commits for one repo."""
+        channel_id = payload.get("channel_id", "")
+        repo_path = payload.get("repo_path")
+        limit = payload.get("limit", 25)
+        try:
+            limit = max(1, min(int(limit), 100))
+        except (TypeError, ValueError):
+            limit = 25
+        if not channel_id:
+            return
+
+        cwd = self._get_channel_cwd(channel_id)
+        repo = self._resolve_repo_path(cwd, repo_path)
+        if not repo:
+            await self._send_frame(session, ws, payload={
+                "action": "files_commits_result",
+                "channel_id": channel_id,
+                "repo_path": repo_path or "",
+                "commits": [],
+                "error": "Repository not found",
+            })
+            return
+
+        fmt = "%H%x1f%h%x1f%ct%x1f%s"
+        out, ok = await _run_git(repo, ["log", f"--max-count={limit}", f"--pretty=format:{fmt}"])
+        commits: list[dict[str, Any]] = []
+        if ok and out:
+            for line in out.splitlines():
+                parts = line.split("\x1f", 3)
+                if len(parts) != 4:
+                    continue
+                sha, short_sha, ts, subject = parts
+                try:
+                    author_time: int | None = int(ts)
+                except ValueError:
+                    author_time = None
+                commits.append({
+                    "sha": sha,
+                    "short_sha": short_sha,
+                    "subject": subject,
+                    "author_time": author_time,
+                })
+
+        await self._send_frame(session, ws, payload={
+            "action": "files_commits_result",
+            "channel_id": channel_id,
+            "repo_path": self._repo_display_path(repo, cwd),
+            "commits": commits,
+            "error": None if ok else "Unable to list commits",
+        })
 
     async def _handle_files_changes(
         self,
@@ -1844,6 +2021,40 @@ class E2EEHandler:
             return
 
         cwd = self._get_channel_cwd(channel_id)
+        repo_path = payload.get("repo_path")
+        newer_ref = payload.get("newer_ref")
+        older_ref = payload.get("older_ref")
+        if repo_path is not None or newer_ref is not None or older_ref is not None:
+            repo = self._resolve_repo_path(cwd, repo_path)
+            if not repo:
+                await self._send_frame(session, ws, payload={
+                    "action": "files_changes_result",
+                    "channel_id": channel_id,
+                    "repos": [{
+                        "path": repo_path or "",
+                        "entries": [],
+                        "newer_ref": newer_ref,
+                        "older_ref": older_ref,
+                        "error": "Repository not found",
+                    }],
+                })
+                return
+            repo_result = await self._collect_repo_revision_changes(
+                repo,
+                cwd,
+                newer_ref or "worktree",
+                older_ref or "HEAD",
+            )
+            await self._send_frame(session, ws, payload={
+                "action": "files_changes_result",
+                "channel_id": channel_id,
+                "repos": [repo_result],
+                "repo_path": repo_result.get("path"),
+                "newer_ref": repo_result.get("newer_ref"),
+                "older_ref": repo_result.get("older_ref"),
+            })
+            return
+
         repo_paths = self._find_all_git_repos(cwd)
 
         if not repo_paths:
@@ -2014,6 +2225,9 @@ class E2EEHandler:
         channel_id = payload.get("channel_id", "")
         rel_path = payload.get("path", "")
         staged = payload.get("staged", False)
+        repo_path = payload.get("repo_path")
+        newer_ref = payload.get("newer_ref")
+        older_ref = payload.get("older_ref")
         if not channel_id or not rel_path:
             return
 
@@ -2027,7 +2241,7 @@ class E2EEHandler:
             })
             return
 
-        repo = find_git_repo(resolved)
+        repo = self._resolve_repo_path(cwd, repo_path) if repo_path is not None else find_git_repo(resolved)
         if not repo:
             await self._send_frame(session, ws, payload={
                 "action": "file_diff_result",
@@ -2043,9 +2257,59 @@ class E2EEHandler:
         try:
             file_repo_rel = str(Path(resolved).resolve().relative_to(Path(repo).resolve()))
         except ValueError:
-            file_repo_rel = rel_path
+            await self._send_frame(session, ws, payload={
+                "action": "file_diff_result",
+                "channel_id": channel_id,
+                "path": rel_path,
+                "repo_path": repo_path,
+                "newer_ref": newer_ref,
+                "older_ref": older_ref,
+                "error": "Path outside repository",
+                "diff": "",
+                "truncated": False,
+            })
+            return
 
-        if staged:
+        if newer_ref is not None or older_ref is not None or repo_path is not None:
+            selected_newer = newer_ref or "worktree"
+            selected_older = older_ref or "HEAD"
+            validated_older = await self._validate_commit_ref(repo, selected_older)
+            if not validated_older:
+                await self._send_frame(session, ws, payload={
+                    "action": "file_diff_result",
+                    "channel_id": channel_id,
+                    "path": rel_path,
+                    "repo_path": self._repo_display_path(repo, cwd),
+                    "newer_ref": selected_newer,
+                    "older_ref": selected_older,
+                    "error": "Invalid older ref",
+                    "diff": "",
+                    "truncated": False,
+                })
+                return
+            if selected_newer == "worktree":
+                diff_out, ok = await _run_git(repo, ["diff", validated_older, "--", file_repo_rel])
+                if not diff_out:
+                    status_out, _ = await _run_git(repo, ["status", "--porcelain=v1", "--", file_repo_rel])
+                    if status_out.startswith("??"):
+                        diff_out, _ = await _run_git(repo, ["diff", "--no-index", "/dev/null", file_repo_rel])
+            else:
+                validated_newer = await self._validate_commit_ref(repo, selected_newer)
+                if not validated_newer:
+                    await self._send_frame(session, ws, payload={
+                        "action": "file_diff_result",
+                        "channel_id": channel_id,
+                        "path": rel_path,
+                        "repo_path": self._repo_display_path(repo, cwd),
+                        "newer_ref": selected_newer,
+                        "older_ref": selected_older,
+                        "error": "Invalid newer ref",
+                        "diff": "",
+                        "truncated": False,
+                    })
+                    return
+                diff_out, ok = await _run_git(repo, ["diff", validated_older, validated_newer, "--", file_repo_rel])
+        elif staged:
             diff_out, ok = await _run_git(repo, ["diff", "--cached", "--", file_repo_rel])
         else:
             diff_out, ok = await _run_git(repo, ["diff", "--", file_repo_rel])
@@ -2064,6 +2328,9 @@ class E2EEHandler:
             "action": "file_diff_result",
             "channel_id": channel_id,
             "path": rel_path,
+            "repo_path": self._repo_display_path(repo, cwd),
+            "newer_ref": newer_ref,
+            "older_ref": older_ref,
             "staged": staged,
             "diff": diff_out,
             "truncated": truncated,
