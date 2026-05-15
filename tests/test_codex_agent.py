@@ -12,6 +12,7 @@ import pytest
 from build_bridge.chat_mcp import ChatMCP
 from build_bridge.codex_agent import (
     CodexHarnessRuntime,
+    SILENCE_LOG_THRESHOLD_S,
     _build_history_context,
     _extract_proposed_plan_text,
     _render_plan_text,
@@ -56,6 +57,20 @@ class _FakeCodexClient:
     async def send_request(self, method: str, params: dict, timeout=None):
         self.requests.append((method, params))
         return {}
+
+
+class _FakeSilentCodexClient:
+    def __init__(self):
+        self.stop_called = False
+
+    async def stop(self):
+        self.stop_called = True
+
+    def pending_requests(self):
+        return []
+
+    def recent_messages(self):
+        return []
 
 
 class TestHistoryContext:
@@ -168,6 +183,33 @@ class TestPlanReviewFlow:
         method, params = client.requests[-1]
         assert method == "turn/start"
         assert params["collaborationMode"]["mode"] == "default"
+
+    def test_silent_turn_snapshot_does_not_stop_codex_client(self, tmp_path: Path):
+        client = _FakeSilentCodexClient()
+        runtime = CodexHarnessRuntime(
+            wrapper=SimpleNamespace(chat_mcp=None),
+            client=client,
+            config=SimpleNamespace(auto_approve_tools=False),
+            model="gpt-5.3-codex",
+            initial_prompt=None,
+            working_directory=str(tmp_path),
+        )
+        runtime.turn_id = "turn-1"
+
+        observed = runtime._observe_silent_turn(SILENCE_LOG_THRESHOLD_S + 1)
+
+        assert observed is True
+        assert runtime._silence_snapshot_logged is True
+        assert client.stop_called is False
+
+        observed_again = runtime._observe_silent_turn(SILENCE_LOG_THRESHOLD_S + 30)
+
+        assert observed_again is False
+        assert client.stop_called is False
+
+        runtime._mark_activity()
+
+        assert runtime._silence_snapshot_logged is False
 
     @pytest.mark.asyncio
     async def test_full_plan_mode_lifecycle_starts_plan_then_exits_after_approval(self, tmp_path: Path):

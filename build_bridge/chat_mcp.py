@@ -10,6 +10,7 @@ Chat MCP calls are NOT reported in the tool.* namespace (§8.4).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -40,6 +41,43 @@ class UnreadMessage:
 
 # Callback fired when messages are read by the agent.
 ReadCallback = Callable[[list[str]], Coroutine[Any, Any, None]]
+
+
+async def _call_send_callback(
+    callback: SendCallback,
+    message: str,
+    suggested_actions: list[str] | None,
+) -> None:
+    """Call send callbacks from both old and new callback shapes."""
+    try:
+        signature = inspect.signature(callback)
+    except (TypeError, ValueError):
+        await callback(message, suggested_actions)
+        return
+
+    positional_count = 0
+    accepts_varargs = False
+    accepts_suggested_actions_keyword = False
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+            accepts_varargs = True
+        elif parameter.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positional_count += 1
+            if parameter.name == "suggested_actions":
+                accepts_suggested_actions_keyword = True
+        elif parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+            if parameter.name == "suggested_actions":
+                accepts_suggested_actions_keyword = True
+
+    if accepts_varargs or positional_count >= 2:
+        await callback(message, suggested_actions)
+    elif accepts_suggested_actions_keyword:
+        await callback(message, suggested_actions=suggested_actions)
+    else:
+        await callback(message)
 
 
 class ChatMCP:
@@ -167,7 +205,7 @@ class ChatMCP:
         The on_send callback is responsible for emitting the BAP message.
         """
         if self._on_send:
-            await self._on_send(message, suggested_actions)
+            await _call_send_callback(self._on_send, message, suggested_actions)
         else:
             log.warning("send called but no on_send callback registered")
 

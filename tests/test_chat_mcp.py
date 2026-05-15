@@ -112,6 +112,17 @@ class TestSend:
         result = await chat.handle_send("Hello")
         assert result == {"status": "sent"}
 
+    async def test_send_passes_suggested_actions_to_new_callback(self):
+        sent_messages = []
+
+        async def on_send(message: str, suggested_actions: list[str] | None = None):
+            sent_messages.append((message, suggested_actions))
+
+        chat = ChatMCP(on_send=on_send)
+        await chat.handle_send("Pick an action.", suggested_actions=["Retry", "Cancel"])
+
+        assert sent_messages == [("Pick an action.", ["Retry", "Cancel"])]
+
     async def test_multiple_sends(self):
         sent_messages = []
 

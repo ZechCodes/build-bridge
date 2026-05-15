@@ -46,7 +46,7 @@ CHAT_CONTEXT = (
 )
 
 PING_INTERVAL_S = 5.0
-HANG_THRESHOLD_S = 120.0
+SILENCE_LOG_THRESHOLD_S = 120.0
 WATCHDOG_INTERVAL_S = 15.0
 QUOTA_ERROR_DEDUP_S = 60.0
 CHAT_SERVER_NAME = "build-chat"
@@ -327,10 +327,10 @@ class CodexHarnessRuntime:
         self._tool_outputs: dict[str, list[str]] = {}
         self._tool_names: dict[str, str] = {}
         self._cancel_event = asyncio.Event()
-        self._last_activity = time.monotonic()
+        self._mark_activity()
+        self._silence_snapshot_logged = False
         self._unread_notified = False
         self._last_quota_error_ts = 0.0
-        self._hang_detected = False
         # Signatures of (tool_name, command-or-path) that the user has
         # approved "for session" — repeat requests within the same agent
         # lifetime auto-accept without prompting again.
@@ -341,6 +341,10 @@ class CodexHarnessRuntime:
         # sees Codex's reply even when the model skips the tool call.
         self._turn_used_send: bool = False
         self._install_plan_send_interceptor()
+
+    def _mark_activity(self) -> None:
+        self._last_activity = time.monotonic()
+        self._silence_snapshot_logged = False
 
     def _install_plan_send_interceptor(self) -> None:
         """Capture Codex proposed-plan sends before they become chat messages."""
@@ -583,7 +587,7 @@ class CodexHarnessRuntime:
                 "settings": {"model": self.model},
             }
 
-        self._last_activity = time.monotonic()
+        self._mark_activity()
         if self.turn_id:
             try:
                 await self.client.send_request("turn/steer", {
@@ -595,7 +599,9 @@ class CodexHarnessRuntime:
             except CodexAppServerError:
                 self.turn_id = None
 
-        # turn/start can run for minutes — rely on _hang_watchdog_loop for liveness.
+        # turn/start can run for minutes. Liveness is reported via pings;
+        # silence alone is not a failure because tools can legitimately run
+        # without producing app-server events for a long time.
         await self.client.send_request("turn/start", params, timeout=None)
 
     async def _interrupt_turn(self) -> None:
@@ -616,40 +622,34 @@ class CodexHarnessRuntime:
                 await self.wrapper.emit_activity_ping()
 
     async def _hang_watchdog_loop(self) -> None:
-        """Detect hung Codex subprocess during active turns and kill it.
+        """Log prolonged Codex silence during active turns.
 
-        Exits the agent process with a non-zero code so agent_spawner's
-        auto-restart fires. Killing just the Codex subprocess is not enough:
-        the agent process's run() loop would keep running with a dead client,
-        and run_agent() catches the downstream CodexAppServerError as a clean
-        exit — auto-restart only triggers on non-zero process exit.
+        Silence alone is expected while Codex waits on a long-running command,
+        model response, approval, or MCP tool. The ping loop keeps the browser
+        informed that the turn is still active; this watchdog only captures one
+        diagnostic snapshot per silent stretch.
         """
         while True:
             await asyncio.sleep(WATCHDOG_INTERVAL_S)
             if not self.turn_id:
+                self._silence_snapshot_logged = False
                 continue
             idle = time.monotonic() - self._last_activity
-            if idle > HANG_THRESHOLD_S:
-                log.error(
-                    "Codex subprocess hung: no activity for %.1fs during turn %s. Exiting for auto-restart.",
-                    idle, self.turn_id,
-                )
-                self._dump_hang_snapshot(idle)
-                self._hang_detected = True
-                try:
-                    await self.client.stop()
-                except Exception:
-                    log.exception("Error stopping hung Codex client")
-                try:
-                    await self.wrapper.emit_system_message(
-                        "Codex subprocess stopped responding — restarting agent."
-                    )
-                except Exception:
-                    log.debug("Failed to emit hang notice", exc_info=True)
-                os._exit(1)
+            self._observe_silent_turn(idle)
+
+    def _observe_silent_turn(self, idle: float) -> bool:
+        if idle <= SILENCE_LOG_THRESHOLD_S or self._silence_snapshot_logged:
+            return False
+        log.warning(
+            "Codex has been silent for %.1fs during turn %s; leaving it running.",
+            idle, self.turn_id,
+        )
+        self._dump_hang_snapshot(idle)
+        self._silence_snapshot_logged = True
+        return True
 
     def _dump_hang_snapshot(self, idle: float) -> None:
-        """Dump runtime + recent message state when a hang is detected."""
+        """Dump runtime + recent message state for a prolonged silent turn."""
         try:
             pending = self.client.pending_requests()
         except Exception:
@@ -680,14 +680,14 @@ class CodexHarnessRuntime:
 
     async def _on_turn_started(self, params: dict[str, Any]) -> None:
         self.turn_id = _turn_id_from_params(params)
-        self._last_activity = time.monotonic()
+        self._mark_activity()
         self._turn_used_send = False
 
     async def _on_turn_completed(self, params: dict[str, Any]) -> None:
         turn = params.get("turn", {})
         completed_turn_id = _turn_id_from_params(params)
         self.turn_id = None
-        self._last_activity = time.monotonic()
+        self._mark_activity()
         self._unread_notified = False
         reason = "error" if turn.get("status") == "failed" else "waiting"
         await self.wrapper.emit_activity_end(reason)
@@ -738,19 +738,19 @@ class CodexHarnessRuntime:
         await self._start_or_steer(f"The user rejected the plan. Revise it.\n\nFeedback: {feedback}")
 
     async def _on_agent_message_delta(self, params: dict[str, Any]) -> None:
-        self._last_activity = time.monotonic()
+        self._mark_activity()
         delta = params.get("delta", "")
         if delta:
             await self.wrapper.emit_activity_delta("text", delta)
 
     async def _on_reasoning_delta(self, params: dict[str, Any]) -> None:
-        self._last_activity = time.monotonic()
+        self._mark_activity()
         delta = params.get("delta", "")
         if delta:
             await self.wrapper.emit_activity_delta("text", delta)
 
     async def _on_plan_delta(self, params: dict[str, Any]) -> None:
-        self._last_activity = time.monotonic()
+        self._mark_activity()
         delta = params.get("delta", "")
         if delta:
             await self.wrapper.emit_activity_delta("text", delta)
@@ -793,7 +793,7 @@ class CodexHarnessRuntime:
             log.debug("Failed to emit synthetic TodoWrite for Codex plan", exc_info=True)
 
     async def _on_item_started(self, params: dict[str, Any]) -> None:
-        self._last_activity = time.monotonic()
+        self._mark_activity()
         item = params.get("item", {})
         if _is_chat_bridge_tool(item):
             return
@@ -811,7 +811,7 @@ class CodexHarnessRuntime:
         await self.wrapper.emit_tool_use(item_id, tool_name, _tool_input_for_item(item))
 
     async def _on_item_completed(self, params: dict[str, Any]) -> None:
-        self._last_activity = time.monotonic()
+        self._mark_activity()
         item = params.get("item", {})
 
         # Track when Codex calls our own build-chat `send` tool so we can
@@ -866,12 +866,14 @@ class CodexHarnessRuntime:
         )
 
     async def _on_command_output_delta(self, params: dict[str, Any]) -> None:
+        self._mark_activity()
         item_id = params.get("itemId")
         delta = params.get("delta", "")
         if item_id and delta:
             self._tool_outputs.setdefault(item_id, []).append(delta)
 
     async def _on_file_change_output_delta(self, params: dict[str, Any]) -> None:
+        self._mark_activity()
         item_id = params.get("itemId")
         delta = params.get("delta", "")
         if item_id and delta:
@@ -879,7 +881,7 @@ class CodexHarnessRuntime:
 
     async def _on_mcp_progress(self, params: dict[str, Any]) -> None:
         message = params.get("message", "")
-        self._last_activity = time.monotonic()
+        self._mark_activity()
         if message:
             await self.wrapper.emit_activity_delta("text", message)
 
