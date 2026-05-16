@@ -300,7 +300,7 @@ Request:
 {
   "client": { "name": "build-web", "version": "<string>" },
   "accept_versions": [1],
-  "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1"]
+  "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1", "worktree.snapshot"]
 }
 ```
 
@@ -309,7 +309,7 @@ Response:
 ```jsonc
 {
   "version": 1,
-  "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1", "dashboard.snapshot"],
+  "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1", "worktree.snapshot", "dashboard.snapshot"],
   "limits": { "max_encrypted_frame_bytes": 262144 }
 }
 ```
@@ -396,6 +396,54 @@ Response:
       "updated_at": 1715788800.0
     }
   ]
+}
+```
+
+#### `worktree.snapshot`
+
+Target: device
+
+Request:
+
+```jsonc
+{ "worktree_id": "<worktree id>" }
+```
+
+Response:
+
+```jsonc
+{
+  "schema": "worktree.snapshot.v1",
+  "worktree": { "id": "<worktree id>", "project_id": "<project id>" },
+  "project": { "id": "<project id>", "name": "<string>" },
+  "workspace": "<absolute path>?",
+  "git": {
+    "repo_path": ".",
+    "branch": "main",
+    "upstream": "origin/main",
+    "staged": 0,
+    "unstaged": 2,
+    "commits": [
+      { "sha": "abc1234", "full_sha": "<sha>", "message": "<subject>", "time": "4m" }
+    ],
+    "error": null
+  },
+  "files": [
+    { "path": "src/app.ts", "status": "M", "add": 12, "del": 3 }
+  ],
+  "diffs": [
+    {
+      "file": "src/app.ts",
+      "add": 12,
+      "del": 3,
+      "lines": [
+        { "type": "ctx", "text": "unchanged line" },
+        { "type": "add", "text": "new line" },
+        { "type": "del", "text": "old line" }
+      ]
+    }
+  ],
+  "tests": []
 }
 ```
 
@@ -1417,7 +1465,7 @@ The `protocol.hello` payload is defined in §5.0.
 
 | v0 action | v1 method/event |
 |-----------|-----------------|
-| persisted project/worktree/plan graph + agent metadata | `project.list`, `worktree.list`, `plan.list`, `dashboard.snapshot` |
+| persisted project/worktree/plan graph + agent metadata | `project.list`, `worktree.list`, `worktree.snapshot`, `plan.list`, `dashboard.snapshot` |
 | `list_channels` | `channel.list` |
 | `create_channel` | `channel.create` |
 | `rename_channel` | `channel.update` |

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -53,6 +54,10 @@ def _capture(handler: E2EEHandler) -> list[dict[str, Any]]:
 
     handler._send_frame = fake_send  # type: ignore[assignment]
     return sent
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 @pytest.mark.asyncio
@@ -211,6 +216,42 @@ async def test_v1_project_worktree_and_plan_list_use_primitives(tmp_path: Path) 
     assert sent[2]["type"] == "plan.list"
     assert sent[2]["payload"]["plans"][0]["id"] == "plan-1"
     assert sent[2]["payload"]["plans"][0]["worktree_id"] == "wt-1"
+
+
+@pytest.mark.asyncio
+async def test_v1_worktree_snapshot_returns_live_git_state(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test User")
+    app_file = repo / "app.txt"
+    app_file.write_text("one\n")
+    _git(repo, "add", "app.txt")
+    _git(repo, "commit", "-m", "initial")
+    app_file.write_text("one\ntwo\n")
+
+    handler = _handler(tmp_path)
+    handler.store.upsert_project("proj-1", "repo", root_path=str(repo), repo="repo", default_branch="main")
+    handler.store.upsert_worktree("wt-1", "proj-1", "Edit app", path=str(repo), branch="main", status="idle")
+    sent = _capture(handler)
+
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {"frame_type": "data", "payload": _v1_request("req-wt-snap", "worktree.snapshot", payload={"worktree_id": "wt-1"})},
+        object(),
+    )
+
+    payload = sent[0]["payload"]
+    assert sent[0]["type"] == "worktree.snapshot"
+    assert payload["schema"] == "worktree.snapshot.v1"
+    assert payload["worktree"]["id"] == "wt-1"
+    assert payload["files"][0]["path"] == "app.txt"
+    assert payload["files"][0]["status"] == "M"
+    assert payload["git"]["unstaged"] == 1
+    assert payload["git"]["commits"][0]["message"] == "initial"
+    assert payload["diffs"][0]["file"] == "app.txt"
+    assert {"type": "add", "text": "two"} in payload["diffs"][0]["lines"]
 
 
 @pytest.mark.asyncio

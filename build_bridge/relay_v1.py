@@ -302,7 +302,14 @@ class V1Protocol:
                 session, ws, app,
                 payload={
                     "version": V1_VERSION,
-                    "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1", "dashboard.snapshot"],
+                    "features": [
+                        "streaming",
+                        "uploads.v2",
+                        "projects.v1",
+                        "plans.v1",
+                        "worktree.snapshot",
+                        "dashboard.snapshot",
+                    ],
                     "limits": {"max_encrypted_frame_bytes": 262144},
                 },
             )
@@ -679,6 +686,20 @@ class V1Protocol:
             ws,
             app,
             payload={"worktrees": [_worktree_primitive_payload(worktree) for worktree in worktrees]},
+        )
+
+    async def _handle_worktree_snapshot(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
+        _ensure_project_graph(self.facade)
+        payload = _payload(app)
+        worktree_id = _require_str(payload.get("worktree_id"), "payload.worktree_id")
+        worktree = self.facade.store.get_worktree(worktree_id)
+        if not worktree:
+            raise V1Error("not_found", "worktree not found", details={"worktree_id": worktree_id})
+        await self._send_response(
+            session,
+            ws,
+            app,
+            payload=await _worktree_snapshot(self.facade, worktree),
         )
 
     async def _handle_plan_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
@@ -1244,6 +1265,152 @@ def _plan_primitive_payload(plan: Any) -> dict[str, Any]:
     }
 
 
+async def _worktree_snapshot(facade: "E2EEHandler", worktree: Any) -> dict[str, Any]:
+    project = facade.store.get_project(worktree.project_id)
+    agent_server = getattr(facade, "_agent_server", None)
+    agent_channel = (
+        agent_server.store.get_channel(worktree.channel_id)
+        if agent_server and worktree.channel_id
+        else None
+    )
+    cwd = _worktree_cwd(worktree, project, agent_channel)
+    workspace_repo, _ = _git_workspace(cwd)
+    repo = str(workspace_repo) if workspace_repo else (files.find_git_repo(cwd) if cwd else None)
+    git_payload: dict[str, Any] = {
+        "repo_path": "",
+        "branch": worktree.branch or getattr(project, "default_branch", "") or "main",
+        "staged": 0,
+        "unstaged": 0,
+        "commits": [],
+        "error": None,
+    }
+    file_entries: list[dict[str, Any]] = []
+    diffs: list[dict[str, Any]] = []
+
+    if repo:
+        repo_changes = await files._collect_repo_changes(repo, cwd)
+        branch, _, upstream = await files.git_branch_info(repo)
+        commits = await _worktree_commits(repo)
+        if repo_changes:
+            raw_entries = repo_changes.get("entries", [])
+            file_entries = [_snapshot_file_entry(entry) for entry in raw_entries]
+            git_payload["repo_path"] = repo_changes.get("path", "")
+            git_payload["staged"] = sum(1 for entry in raw_entries if entry.get("staged_status"))
+            git_payload["unstaged"] = sum(1 for entry in raw_entries if entry.get("git_status"))
+            diffs = await _worktree_diffs(repo, cwd, raw_entries)
+        else:
+            git_payload["repo_path"] = files._repo_display_path(repo, cwd)
+        git_payload["branch"] = branch or git_payload["branch"]
+        git_payload["upstream"] = upstream
+        git_payload["commits"] = commits
+    else:
+        git_payload["error"] = "Repository not found"
+
+    return {
+        "schema": "worktree.snapshot.v1",
+        "worktree": _worktree_primitive_payload(worktree),
+        "project": _project_primitive_payload(project, facade.store.list_worktrees(project.id)) if project else None,
+        "workspace": cwd,
+        "git": git_payload,
+        "files": file_entries,
+        "diffs": diffs,
+        "tests": [],
+    }
+
+
+def _worktree_cwd(worktree: Any, project: Any, agent_channel: Any) -> str:
+    raw = (
+        getattr(agent_channel, "working_directory", "")
+        or getattr(worktree, "path", "")
+        or getattr(project, "root_path", "")
+        or ""
+    )
+    if not raw:
+        return ""
+    try:
+        return str(Path(os.path.expanduser(str(raw))).resolve())
+    except OSError:
+        return str(raw)
+
+
+def _snapshot_file_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    status = entry.get("git_status") or entry.get("staged_status") or "M"
+    return {
+        "path": entry.get("path", ""),
+        "status": status,
+        "add": int(entry.get("insertions") or 0),
+        "del": int(entry.get("deletions") or 0),
+        "staged_status": entry.get("staged_status"),
+        "git_status": entry.get("git_status"),
+    }
+
+
+async def _worktree_commits(repo: str, limit: int = 8) -> list[dict[str, Any]]:
+    fmt = "%H%x1f%h%x1f%ct%x1f%s"
+    out, ok = await files._run_git(repo, ["log", f"--max-count={limit}", f"--pretty=format:{fmt}"])
+    if not ok or not out:
+        return []
+    commits: list[dict[str, Any]] = []
+    for line in out.splitlines():
+        parts = line.split("\x1f", 3)
+        if len(parts) != 4:
+            continue
+        sha, short_sha, timestamp, subject = parts
+        commits.append({
+            "sha": short_sha,
+            "full_sha": sha,
+            "message": subject,
+            "time": _relative_time(_timestamp(timestamp)),
+        })
+    return commits
+
+
+async def _worktree_diffs(repo: str, cwd: str, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    diffs: list[dict[str, Any]] = []
+    for entry in entries[:3]:
+        rel_path = _repo_relative_path(repo, cwd, entry.get("path", ""))
+        if not rel_path:
+            continue
+        out, ok = await files._run_git(repo, ["diff", "--", rel_path], timeout=5.0)
+        if not out:
+            out, ok = await files._run_git(repo, ["diff", "--cached", "--", rel_path], timeout=5.0)
+        if not ok or not out:
+            continue
+        parsed = _parse_unified_diff(out)
+        if parsed:
+            diffs.append({
+                "file": entry.get("path", rel_path),
+                "add": int(entry.get("insertions") or 0),
+                "del": int(entry.get("deletions") or 0),
+                "lines": parsed[:120],
+            })
+    return diffs
+
+
+def _repo_relative_path(repo: str, cwd: str, path: str) -> str:
+    try:
+        abs_path = (Path(cwd) / path).resolve()
+        return str(abs_path.relative_to(Path(repo).resolve()))
+    except (OSError, ValueError):
+        return path
+
+
+def _parse_unified_diff(diff_text: str) -> list[dict[str, str]]:
+    lines: list[dict[str, str]] = []
+    for raw in diff_text.splitlines():
+        if raw.startswith(("diff --git", "index ", "+++", "---")):
+            continue
+        if raw.startswith("@@"):
+            continue
+        if raw.startswith("+"):
+            lines.append({"type": "add", "text": raw[1:]})
+        elif raw.startswith("-"):
+            lines.append({"type": "del", "text": raw[1:]})
+        elif raw.startswith(" "):
+            lines.append({"type": "ctx", "text": raw[1:]})
+    return lines
+
+
 def _dashboard_plan_status(plan_status: str, worktree_status: str) -> str:
     if plan_status not in {"draft", "queued"}:
         return plan_status
@@ -1372,6 +1539,8 @@ def _timestamp(value: Any) -> float:
     if isinstance(value, int | float):
         return float(value)
     if isinstance(value, str) and value:
+        if value.isdigit():
+            return float(value)
         try:
             text = value[:-1] + "+00:00" if value.endswith("Z") else value
             return datetime.fromisoformat(text).timestamp()
