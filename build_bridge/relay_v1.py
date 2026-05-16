@@ -307,6 +307,7 @@ class V1Protocol:
                         "streaming",
                         "uploads.v2",
                         "projects.v1",
+                        "project.create",
                         "plans.v1",
                         "worktree.create",
                         "worktree.snapshot",
@@ -676,6 +677,43 @@ class V1Protocol:
                     for project in self.facade.store.list_projects()
                 ],
             },
+        )
+
+    async def _handle_project_create(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
+        payload = _payload(app)
+        name = _clean_text(payload.get("name"))
+        raw_root = (
+            _clean_text(payload.get("root_path"))
+            or _clean_text(payload.get("directory"))
+            or _clean_text(payload.get("path"))
+        )
+        if not name:
+            raise V1Error("invalid_request", "payload.name is required", details={"field": "payload.name"})
+        if not raw_root:
+            raise V1Error("invalid_request", "payload.root_path is required", details={"field": "payload.root_path"})
+
+        root = Path(os.path.expanduser(os.path.expandvars(raw_root))).resolve()
+        if not root.is_dir():
+            raise V1Error(
+                "invalid_request",
+                "payload.root_path must be an existing directory",
+                details={"field": "payload.root_path", "root_path": str(root)},
+            )
+
+        repo_root, branch = _git_workspace(str(root))
+        project = self.facade.store.upsert_project(
+            _workspace_project_id(str(root), name),
+            name,
+            root_path=str(root),
+            repo=(repo_root.name if repo_root and repo_root == root else root.name) or name,
+            default_branch=(branch if repo_root and repo_root == root else "") or "main",
+            color=_color_for(str(root)),
+        )
+        await self._send_response(
+            session,
+            ws,
+            app,
+            payload={"project": _project_primitive_payload(project, self.facade.store.list_worktrees(project.id))},
         )
 
     async def _handle_worktree_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:

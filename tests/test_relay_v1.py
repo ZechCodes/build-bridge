@@ -219,6 +219,33 @@ async def test_v1_project_worktree_and_plan_list_use_primitives(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_v1_project_create_sets_name_and_directory(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    handler = _handler(tmp_path)
+    sent = _capture(handler)
+
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {
+            "frame_type": "data",
+            "payload": _v1_request(
+                "req-project-create",
+                "project.create",
+                payload={"name": "Workspace", "root_path": str(root)},
+            ),
+        },
+        object(),
+    )
+
+    payload = sent[0]["payload"]
+    assert sent[0]["type"] == "project.create"
+    assert payload["project"]["name"] == "Workspace"
+    assert payload["project"]["root_path"] == str(root)
+    assert handler.store.get_project(payload["project"]["id"]).root_path == str(root)
+
+
+@pytest.mark.asyncio
 async def test_v1_worktree_create_attaches_channel_and_plan(tmp_path: Path) -> None:
     handler = _handler(tmp_path)
     handler.store.upsert_project(

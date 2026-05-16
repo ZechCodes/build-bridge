@@ -300,7 +300,7 @@ Request:
 {
   "client": { "name": "build-web", "version": "<string>" },
   "accept_versions": [1],
-  "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1", "worktree.create", "worktree.snapshot"]
+  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "plans.v1", "worktree.create", "worktree.snapshot"]
 }
 ```
 
@@ -309,7 +309,7 @@ Response:
 ```jsonc
 {
   "version": 1,
-  "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1", "worktree.create", "worktree.snapshot", "dashboard.snapshot"],
+  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "plans.v1", "worktree.create", "worktree.snapshot", "dashboard.snapshot"],
   "limits": { "max_encrypted_frame_bytes": 262144 }
 }
 ```
@@ -364,6 +364,37 @@ Response:
       "worktree_count": 2
     }
   ]
+}
+```
+
+#### `project.create`
+
+Target: device
+
+Request:
+
+```jsonc
+{
+  "name": "<project name>",
+  "root_path": "<absolute project directory>"
+}
+```
+
+Response:
+
+```jsonc
+{
+  "project": {
+    "id": "<project id>",
+    "name": "<project name>",
+    "root_path": "<absolute project directory>",
+    "repo": "<directory or root git repo name>",
+    "default_branch": "main",
+    "color": "#6366f1",
+    "created_at": 1715788800.0,
+    "updated_at": 1715788800.0,
+    "worktree_count": 0
+  }
 }
 ```
 
@@ -1511,7 +1542,7 @@ The `protocol.hello` payload is defined in §5.0.
 
 | v0 action | v1 method/event |
 |-----------|-----------------|
-| persisted project/worktree/plan graph + agent metadata | `project.list`, `worktree.list`, `worktree.create`, `worktree.snapshot`, `plan.list`, `dashboard.snapshot` |
+| persisted project/worktree/plan graph + agent metadata | `project.list`, `project.create`, `worktree.list`, `worktree.create`, `worktree.snapshot`, `plan.list`, `dashboard.snapshot` |
 | `list_channels` | `channel.list` |
 | `create_channel` | `channel.create` |
 | `rename_channel` | `channel.update` |
