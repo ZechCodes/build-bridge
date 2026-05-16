@@ -219,6 +219,45 @@ async def test_v1_project_worktree_and_plan_list_use_primitives(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_v1_worktree_create_attaches_channel_and_plan(tmp_path: Path) -> None:
+    handler = _handler(tmp_path)
+    handler.store.upsert_project(
+        "proj-1",
+        "api-gateway",
+        root_path="/work/api-gateway",
+        repo="api-gateway",
+        default_branch="main",
+        color="#6366f1",
+    )
+    sent = _capture(handler)
+
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {
+            "frame_type": "data",
+            "payload": _v1_request(
+                "req-worktree-create",
+                "worktree.create",
+                payload={"project_id": "proj-1", "name": "Tenant middleware"},
+            ),
+        },
+        object(),
+    )
+
+    payload = sent[0]["payload"]
+    channel_id = payload["channel"]["id"]
+    worktree_id = payload["worktree"]["id"]
+    assert sent[0]["type"] == "worktree.create"
+    assert sent[0]["target"]["channel_id"] == channel_id
+    assert handler.store.get_channel(channel_id).name == "Tenant middleware"
+    assert handler.store.get_worktree(worktree_id).channel_id == channel_id
+    assert payload["worktree"]["project_id"] == "proj-1"
+    assert payload["worktree"]["path"] == "/work/api-gateway"
+    assert payload["plan"]["worktree_id"] == worktree_id
+    assert payload["plan"]["channel_id"] == channel_id
+
+
+@pytest.mark.asyncio
 async def test_v1_worktree_snapshot_returns_live_git_state(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

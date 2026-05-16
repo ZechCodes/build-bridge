@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from build_bridge import relay_protocol as v0
+from build_bridge.harness_registry import get_harness
 from build_bridge.relay_handlers import (
     activity,
     agents,
@@ -307,6 +308,7 @@ class V1Protocol:
                         "uploads.v2",
                         "projects.v1",
                         "plans.v1",
+                        "worktree.create",
                         "worktree.snapshot",
                         "dashboard.snapshot",
                     ],
@@ -686,6 +688,73 @@ class V1Protocol:
             ws,
             app,
             payload={"worktrees": [_worktree_primitive_payload(worktree) for worktree in worktrees]},
+        )
+
+    async def _handle_worktree_create(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
+        _ensure_project_graph(self.facade)
+        payload = _payload(app)
+        project_id = _require_str(payload.get("project_id"), "payload.project_id")
+        project = self.facade.store.get_project(project_id)
+        if not project:
+            raise V1Error("not_found", "project not found", details={"project_id": project_id})
+
+        name = _clean_text(payload.get("name")) or "New worktree"
+        worktree_id = _clean_text(payload.get("worktree_id")) or _new_id("wt")
+        channel_id = _clean_text(payload.get("channel_id")) or str(uuid.uuid4())
+        branch = _clean_text(payload.get("branch")) or f"agents/{_slug(name)}-{uuid.uuid4().hex[:6]}"
+        base_ref = _clean_text(payload.get("base_ref")) or project.default_branch or "HEAD"
+        path = _clean_text(payload.get("path"))
+        git_created = False
+        git_error = None
+
+        if payload.get("create_git_worktree") is True:
+            created_path, git_error = await _create_git_worktree(project, path, branch, base_ref)
+            git_created = git_error is None
+            if git_created or path:
+                path = created_path
+        if not path:
+            path = project.root_path
+
+        channel = self.facade.store.create_channel(channel_id, name)
+        worktree = self.facade.store.upsert_worktree(
+            worktree_id,
+            project.id,
+            name,
+            path=path,
+            branch=branch,
+            status="idle",
+            channel_id=channel.id,
+            base_ref=base_ref,
+            head_ref=branch,
+        )
+        agent_payload = payload.get("agent") if isinstance(payload.get("agent"), dict) else {}
+        agent, agent_error = await _attach_worktree_agent(self.facade, channel.id, agent_payload, path)
+        plan = self.facade.store.upsert_plan(
+            _new_id("plan"),
+            project.id,
+            name,
+            worktree_id=worktree.id,
+            channel_id=channel.id,
+            status="draft",
+            step_count=1,
+            done_step_count=0,
+            model=str((agent or {}).get("model") or agent_payload.get("model") or ""),
+        )
+
+        await self._send_response(
+            session,
+            ws,
+            app,
+            payload={
+                "project": _project_primitive_payload(project, self.facade.store.list_worktrees(project.id)),
+                "worktree": _worktree_primitive_payload(worktree),
+                "plan": _plan_primitive_payload(plan),
+                "channel": {"id": channel.id, "name": channel.name, "created_at": channel.created_at},
+                "agent": agent,
+                "agent_error": agent_error,
+                "git": {"created": git_created, "error": git_error},
+            },
+            target=_target(self.facade, app, channel.id),
         )
 
     async def _handle_worktree_snapshot(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
@@ -1263,6 +1332,103 @@ def _plan_primitive_payload(plan: Any) -> dict[str, Any]:
         "created_at": plan.created_at,
         "updated_at": plan.updated_at,
     }
+
+
+def _clean_text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+async def _attach_worktree_agent(
+    facade: "E2EEHandler",
+    channel_id: str,
+    agent: dict[str, Any],
+    working_directory: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    agent_server = getattr(facade, "_agent_server", None)
+    agent_spawner = getattr(facade, "_agent_spawner", None)
+
+    if agent_server:
+        agent_server.store.ensure_channel_row(channel_id)
+        if working_directory:
+            agent_server.store.update_working_directory(channel_id, working_directory)
+
+    harness = _clean_text(agent.get("harness"))
+    if not harness:
+        return None, None
+
+    harness_info = get_harness(harness)
+    if not harness_info:
+        return None, f"unknown harness: {harness}"
+
+    model = _clean_text(agent.get("model")) or harness_info.default_model
+    effort = _clean_text(agent.get("effort"))
+    system_prompt = _clean_text(agent.get("system_prompt"))
+    auto_approve_tools = bool(agent.get("auto_approve_tools", False))
+
+    if agent_server:
+        agent_server.store.update_harness(channel_id, harness)
+        agent_server.store.update_model(channel_id, model)
+        agent_server.store.update_effort(channel_id, effort)
+        agent_server.store.update_auto_approve_tools(channel_id, auto_approve_tools)
+
+    if not agent_spawner:
+        return None, "agent spawner not available"
+
+    try:
+        worker = await agent_spawner.spawn(
+            channel_id=channel_id,
+            harness=harness,
+            model=model,
+            effort=effort,
+            system_prompt=system_prompt,
+            working_directory=working_directory,
+            auto_approve_tools=auto_approve_tools,
+        )
+    except Exception as exc:  # noqa: BLE001 - creation still succeeds without a running agent.
+        log.error("Failed to spawn worktree agent for channel %s: %s", channel_id[:8], exc)
+        return None, str(exc)
+
+    return {
+        "agent_id": worker.agent_id,
+        "harness": harness,
+        "model": model,
+        "effort": effort,
+        "working_directory": working_directory,
+        "pid": worker.pid,
+    }, None
+
+
+async def _create_git_worktree(
+    project: Any,
+    path: str,
+    branch: str,
+    base_ref: str,
+) -> tuple[str, str | None]:
+    repo_root, _ = _git_workspace(project.root_path)
+    if not repo_root:
+        return path, "repository not found"
+
+    target = Path(os.path.expanduser(path)).resolve() if path else _default_worktree_path(repo_root, branch)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return str(target), str(exc)
+
+    args = ["worktree", "add", "-b", branch, str(target), base_ref or "HEAD"]
+    out, ok = await files._run_git(str(repo_root), args, timeout=30.0)
+    if not ok:
+        return str(target), out or "git worktree add failed"
+    return str(target), None
+
+
+def _default_worktree_path(repo_root: Path, branch: str) -> Path:
+    base = repo_root.parent / f"{repo_root.name}.worktrees"
+    leaf = _slug(branch.split("/")[-1] or branch)
+    candidate = base / leaf
+    if not candidate.exists():
+        return candidate
+    suffix = uuid.uuid4().hex[:6]
+    return base / f"{leaf}-{suffix}"
 
 
 async def _worktree_snapshot(facade: "E2EEHandler", worktree: Any) -> dict[str, Any]:

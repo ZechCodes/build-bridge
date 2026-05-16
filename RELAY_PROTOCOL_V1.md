@@ -300,7 +300,7 @@ Request:
 {
   "client": { "name": "build-web", "version": "<string>" },
   "accept_versions": [1],
-  "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1", "worktree.snapshot"]
+  "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1", "worktree.create", "worktree.snapshot"]
 }
 ```
 
@@ -309,7 +309,7 @@ Response:
 ```jsonc
 {
   "version": 1,
-  "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1", "worktree.snapshot", "dashboard.snapshot"],
+  "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1", "worktree.create", "worktree.snapshot", "dashboard.snapshot"],
   "limits": { "max_encrypted_frame_bytes": 262144 }
 }
 ```
@@ -396,6 +396,52 @@ Response:
       "updated_at": 1715788800.0
     }
   ]
+}
+```
+
+#### `worktree.create`
+
+Target: device
+
+Request:
+
+```jsonc
+{
+  "project_id": "<project id>",
+  "name": "<display name>?",
+  "branch": "agents/<branch>?",
+  "path": "<absolute path>?",
+  "base_ref": "main?",
+  "create_git_worktree": false,
+  "agent": {
+    "harness": "codex?",
+    "model": "<model id>?",
+    "effort": "<effort>?",
+    "system_prompt": "<prompt>?",
+    "auto_approve_tools": false
+  }
+}
+```
+
+Response:
+
+```jsonc
+{
+  "project": { "id": "<project id>", "name": "<string>" },
+  "worktree": {
+    "id": "<worktree id>",
+    "project_id": "<project id>",
+    "channel_id": "<channel id>",
+    "name": "<display name>",
+    "path": "<absolute path>?",
+    "branch": "agents/<branch>",
+    "status": "idle"
+  },
+  "plan": { "id": "<plan id>", "worktree_id": "<worktree id>", "channel_id": "<channel id>" },
+  "channel": { "id": "<channel id>", "name": "<display name>" },
+  "agent": { "agent_id": "<agent id>", "harness": "codex", "model": "<model id>", "pid": 12345 },
+  "agent_error": null,
+  "git": { "created": false, "error": null }
 }
 ```
 
@@ -1465,7 +1511,7 @@ The `protocol.hello` payload is defined in §5.0.
 
 | v0 action | v1 method/event |
 |-----------|-----------------|
-| persisted project/worktree/plan graph + agent metadata | `project.list`, `worktree.list`, `worktree.snapshot`, `plan.list`, `dashboard.snapshot` |
+| persisted project/worktree/plan graph + agent metadata | `project.list`, `worktree.list`, `worktree.create`, `worktree.snapshot`, `plan.list`, `dashboard.snapshot` |
 | `list_channels` | `channel.list` |
 | `create_channel` | `channel.create` |
 | `rename_channel` | `channel.update` |
