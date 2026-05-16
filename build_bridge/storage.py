@@ -33,6 +33,33 @@ class Message:
     attachments: list[dict[str, Any]] | None = None  # [{file_id, filename, size, mime_type, path}]
 
 
+@dataclass
+class Project:
+    id: str
+    name: str
+    root_path: str
+    repo: str
+    default_branch: str
+    color: str
+    created_at: float
+    updated_at: float
+
+
+@dataclass
+class Worktree:
+    id: str
+    project_id: str
+    name: str
+    path: str
+    branch: str
+    status: str
+    created_at: float
+    updated_at: float
+    channel_id: str | None = None
+    base_ref: str = ""
+    head_ref: str = ""
+
+
 class MessageStore:
     """SQLite-backed local message store for the device."""
 
@@ -64,12 +91,243 @@ class MessageStore:
 
             CREATE INDEX IF NOT EXISTS idx_messages_channel
                 ON messages(channel_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS projects (
+                id             TEXT PRIMARY KEY,
+                name           TEXT NOT NULL,
+                root_path      TEXT NOT NULL DEFAULT '',
+                repo           TEXT NOT NULL DEFAULT '',
+                default_branch TEXT NOT NULL DEFAULT 'main',
+                color          TEXT NOT NULL DEFAULT '',
+                created_at     REAL NOT NULL,
+                updated_at     REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_projects_updated
+                ON projects(updated_at);
+
+            CREATE TABLE IF NOT EXISTS worktrees (
+                id         TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id),
+                channel_id TEXT UNIQUE,
+                name       TEXT NOT NULL,
+                path       TEXT NOT NULL DEFAULT '',
+                branch     TEXT NOT NULL DEFAULT '',
+                base_ref   TEXT NOT NULL DEFAULT '',
+                head_ref   TEXT NOT NULL DEFAULT '',
+                status     TEXT NOT NULL DEFAULT 'idle',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_worktrees_project
+                ON worktrees(project_id, updated_at);
         """)
         # Migration: add attachments column if missing (existing databases).
         try:
             self.db.execute("SELECT attachments FROM messages LIMIT 0")
         except sqlite3.OperationalError:
             self.db.execute("ALTER TABLE messages ADD COLUMN attachments TEXT")
+
+    # ----- Projects / worktrees -----
+
+    def upsert_project(
+        self,
+        project_id: str,
+        name: str,
+        *,
+        root_path: str = "",
+        repo: str = "",
+        default_branch: str = "main",
+        color: str = "",
+    ) -> Project:
+        """Create or update a project primitive."""
+        now = time.time()
+        existing = self.get_project(project_id)
+        created_at = existing.created_at if existing else now
+        changed = not existing or (
+            existing.name != name
+            or existing.root_path != root_path
+            or existing.repo != repo
+            or existing.default_branch != default_branch
+            or existing.color != color
+        )
+        updated_at = now if changed else existing.updated_at
+        self.db.execute(
+            """INSERT INTO projects
+               (id, name, root_path, repo, default_branch, color, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   name = excluded.name,
+                   root_path = excluded.root_path,
+                   repo = excluded.repo,
+                   default_branch = excluded.default_branch,
+                   color = excluded.color,
+                   updated_at = excluded.updated_at""",
+            (project_id, name, root_path, repo, default_branch, color, created_at, updated_at),
+        )
+        self.db.commit()
+        return Project(
+            id=project_id,
+            name=name,
+            root_path=root_path,
+            repo=repo,
+            default_branch=default_branch,
+            color=color,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+
+    def get_project(self, project_id: str) -> Project | None:
+        row = self.db.execute(
+            "SELECT * FROM projects WHERE id = ?",
+            (project_id,),
+        ).fetchone()
+        return self._row_to_project(row) if row else None
+
+    def list_projects(self) -> list[Project]:
+        rows = self.db.execute(
+            "SELECT * FROM projects ORDER BY updated_at DESC"
+        ).fetchall()
+        return [self._row_to_project(row) for row in rows]
+
+    def upsert_worktree(
+        self,
+        worktree_id: str,
+        project_id: str,
+        name: str,
+        *,
+        path: str = "",
+        branch: str = "",
+        status: str = "idle",
+        channel_id: str | None = None,
+        base_ref: str = "",
+        head_ref: str = "",
+    ) -> Worktree:
+        """Create or update a worktree primitive."""
+        now = time.time()
+        existing = self.get_worktree(worktree_id)
+        if existing is None and channel_id:
+            existing = self.get_worktree_by_channel(channel_id)
+            if existing:
+                worktree_id = existing.id
+        created_at = existing.created_at if existing else now
+        changed = not existing or (
+            existing.project_id != project_id
+            or existing.channel_id != channel_id
+            or existing.name != name
+            or existing.path != path
+            or existing.branch != branch
+            or existing.base_ref != base_ref
+            or existing.head_ref != head_ref
+            or existing.status != status
+        )
+        updated_at = now if changed else existing.updated_at
+        self.db.execute(
+            """INSERT INTO worktrees
+               (id, project_id, channel_id, name, path, branch, base_ref, head_ref, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   project_id = excluded.project_id,
+                   channel_id = excluded.channel_id,
+                   name = excluded.name,
+                   path = excluded.path,
+                   branch = excluded.branch,
+                   base_ref = excluded.base_ref,
+                   head_ref = excluded.head_ref,
+                   status = excluded.status,
+                   updated_at = excluded.updated_at""",
+            (
+                worktree_id,
+                project_id,
+                channel_id,
+                name,
+                path,
+                branch,
+                base_ref,
+                head_ref,
+                status,
+                created_at,
+                updated_at,
+            ),
+        )
+        self.db.commit()
+        return Worktree(
+            id=worktree_id,
+            project_id=project_id,
+            channel_id=channel_id,
+            name=name,
+            path=path,
+            branch=branch,
+            base_ref=base_ref,
+            head_ref=head_ref,
+            status=status,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+
+    def get_worktree(self, worktree_id: str) -> Worktree | None:
+        row = self.db.execute(
+            "SELECT * FROM worktrees WHERE id = ?",
+            (worktree_id,),
+        ).fetchone()
+        return self._row_to_worktree(row) if row else None
+
+    def get_worktree_by_channel(self, channel_id: str) -> Worktree | None:
+        row = self.db.execute(
+            "SELECT * FROM worktrees WHERE channel_id = ?",
+            (channel_id,),
+        ).fetchone()
+        return self._row_to_worktree(row) if row else None
+
+    def list_worktrees(self, project_id: str | None = None) -> list[Worktree]:
+        if project_id:
+            rows = self.db.execute(
+                "SELECT * FROM worktrees WHERE project_id = ? ORDER BY updated_at DESC",
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM worktrees ORDER BY updated_at DESC"
+            ).fetchall()
+        return [self._row_to_worktree(row) for row in rows]
+
+    def clear_worktree_channel(self, channel_id: str) -> None:
+        """Detach a deleted channel from its worktree without deleting the project."""
+        self.db.execute(
+            "UPDATE worktrees SET channel_id = NULL, status = 'idle', updated_at = ? WHERE channel_id = ?",
+            (time.time(), channel_id),
+        )
+        self.db.commit()
+
+    @staticmethod
+    def _row_to_project(row: sqlite3.Row) -> Project:
+        return Project(
+            id=row["id"],
+            name=row["name"],
+            root_path=row["root_path"],
+            repo=row["repo"],
+            default_branch=row["default_branch"],
+            color=row["color"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _row_to_worktree(row: sqlite3.Row) -> Worktree:
+        return Worktree(
+            id=row["id"],
+            project_id=row["project_id"],
+            channel_id=row["channel_id"],
+            name=row["name"],
+            path=row["path"],
+            branch=row["branch"],
+            base_ref=row["base_ref"],
+            head_ref=row["head_ref"],
+            status=row["status"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
     def create_channel(self, channel_id: str, name: str) -> Channel:
         """Create a new channel."""
@@ -110,6 +368,10 @@ class MessageStore:
 
     def delete_channel(self, channel_id: str) -> None:
         """Delete a channel and all its messages."""
+        self.db.execute(
+            "UPDATE worktrees SET channel_id = NULL, status = 'idle', updated_at = ? WHERE channel_id = ?",
+            (time.time(), channel_id),
+        )
         self.db.execute(
             "DELETE FROM messages WHERE channel_id = ?", (channel_id,)
         )

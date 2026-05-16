@@ -302,7 +302,7 @@ class V1Protocol:
                 session, ws, app,
                 payload={
                     "version": V1_VERSION,
-                    "features": ["streaming", "uploads.v2", "dashboard.snapshot"],
+                    "features": ["streaming", "uploads.v2", "projects.v1", "dashboard.snapshot"],
                     "limits": {"max_encrypted_frame_bytes": 262144},
                 },
             )
@@ -655,6 +655,32 @@ class V1Protocol:
             payload=_dashboard_snapshot(self.facade),
         )
 
+    async def _handle_project_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
+        _ensure_project_graph(self.facade)
+        await self._send_response(
+            session,
+            ws,
+            app,
+            payload={
+                "projects": [
+                    _project_primitive_payload(project, self.facade.store.list_worktrees(project.id))
+                    for project in self.facade.store.list_projects()
+                ],
+            },
+        )
+
+    async def _handle_worktree_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
+        _ensure_project_graph(self.facade)
+        payload = _payload(app)
+        project_id = payload.get("project_id")
+        worktrees = self.facade.store.list_worktrees(project_id if isinstance(project_id, str) else None)
+        await self._send_response(
+            session,
+            ws,
+            app,
+            payload={"worktrees": [_worktree_primitive_payload(worktree) for worktree in worktrees]},
+        )
+
     async def _handle_upload_create(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
         payload = _payload(app)
         upload_id = payload.get("upload_id") or _new_id("upl")
@@ -984,86 +1010,93 @@ _DASHBOARD_COLORS = (
 
 
 def _dashboard_snapshot(facade: "E2EEHandler") -> dict[str, Any]:
-    projects: dict[str, dict[str, Any]] = {}
-    channels_in = facade.store.list_channels()
+    _ensure_project_graph(facade)
     agent_server = getattr(facade, "_agent_server", None)
     agent_spawner = getattr(facade, "_agent_spawner", None)
     device_id = str(getattr(facade.config, "device_id", ""))
+    channel_by_id = {channel.id: channel for channel in facade.store.list_channels()}
+    out_projects: list[dict[str, Any]] = []
 
-    for channel in channels_in:
-        agent_channel = agent_server.store.get_channel(channel.id) if agent_server else None
-        cwd = str(getattr(agent_channel, "working_directory", "") or "")
-        workspace = _workspace_identity(channel.name, cwd)
-        project = projects.get(workspace["key"])
-        if project is None:
-            project = {
-                "id": workspace["id"],
-                "name": workspace["name"],
-                "description": workspace["description"],
-                "repo": workspace["repo"],
-                "branch": workspace["branch"],
-                "color": _color_for(workspace["id"]),
-                "needsYou": 0,
-                "runningAgents": 0,
-                "queued": 0,
-                "lastActive": "now",
-                "worktrees": [],
-                "plans": [],
-                "activity": [],
-                "_last_active_ts": 0.0,
-            }
-            projects[workspace["key"]] = project
+    for project_record in facade.store.list_projects():
+        project = {
+            "id": project_record.id,
+            "name": project_record.name,
+            "description": "Repository workspace" if project_record.root_path else "Local workspace",
+            "repo": project_record.repo or project_record.name,
+            "branch": project_record.default_branch or "main",
+            "color": project_record.color or _color_for(project_record.id),
+            "needsYou": 0,
+            "runningAgents": 0,
+            "queued": 0,
+            "lastActive": _relative_time(project_record.updated_at),
+            "root_path": project_record.root_path,
+            "worktrees": [],
+            "plans": [],
+            "activity": [],
+            "_last_active_ts": project_record.updated_at,
+        }
+        for worktree in facade.store.list_worktrees(project_record.id):
+            channel = channel_by_id.get(worktree.channel_id or "")
+            agent_channel = (
+                agent_server.store.get_channel(worktree.channel_id)
+                if agent_server and worktree.channel_id
+                else None
+            )
+            is_running = bool(
+                agent_channel
+                and agent_spawner
+                and worktree.channel_id
+                and agent_spawner.is_running(worktree.channel_id)
+                and getattr(agent_channel, "status", "") == "active"
+            )
+            status = _dashboard_worktree_status(agent_channel, is_running) if agent_channel else worktree.status
+            updated_at = (
+                _timestamp(getattr(agent_channel, "updated_at", None))
+                or worktree.updated_at
+                or _timestamp(getattr(channel, "created_at", None))
+                or project_record.updated_at
+            )
+            last_active = _relative_time(updated_at)
+            model = str(getattr(agent_channel, "model", "") or getattr(agent_channel, "harness", "") or "device")
+            display_agent = _display_agent(agent_channel)
+            plan_id = f"plan-{worktree.id[:8]}"
 
-        is_running = bool(
-            agent_channel
-            and agent_spawner
-            and agent_spawner.is_running(channel.id)
-            and getattr(agent_channel, "status", "") == "active"
-        )
-        status = _dashboard_worktree_status(agent_channel, is_running)
-        updated_at = getattr(agent_channel, "updated_at", None) if agent_channel else channel.created_at
-        last_active_ts = _timestamp(updated_at) or _timestamp(channel.created_at) or time.time()
-        last_active = _relative_time(last_active_ts)
-        plan_id = f"plan-{channel.id[:8]}"
-        model = str(getattr(agent_channel, "model", "") or getattr(agent_channel, "harness", "") or "device")
-        display_agent = _display_agent(agent_channel)
+            if status == "working":
+                project["runningAgents"] += 1
+            project["_last_active_ts"] = max(float(project["_last_active_ts"]), updated_at)
+            project["lastActive"] = _relative_time(float(project["_last_active_ts"]))
+            project["worktrees"].append({
+                "id": worktree.id,
+                "project_id": worktree.project_id,
+                "channel_id": worktree.channel_id,
+                "branch": worktree.branch or project_record.default_branch or "main",
+                "plan": plan_id,
+                "model": model,
+                "agent": display_agent,
+                "status": status,
+                "summary": worktree.name,
+                "device": device_id or "local",
+                "workspace": worktree.path or project_record.root_path,
+                "pct": 40 if status == "working" else 0,
+                "files": 0,
+                "add": 0,
+                "del": 0,
+                "updated": last_active,
+            })
+            project["plans"].append({
+                "id": plan_id,
+                "project_id": worktree.project_id,
+                "worktree_id": worktree.id,
+                "channel_id": worktree.channel_id,
+                "title": worktree.name,
+                "status": "in-progress" if status in {"working", "blocked"} else "draft",
+                "steps": 1,
+                "doneSteps": 0,
+                "model": model,
+                "updated": last_active,
+            })
+            project["activity"].append(f"{display_agent} {status} in {worktree.name}")
 
-        if status == "working":
-            project["runningAgents"] += 1
-
-        project["_last_active_ts"] = max(float(project["_last_active_ts"]), last_active_ts)
-        project["lastActive"] = _relative_time(float(project["_last_active_ts"]))
-        project["worktrees"].append({
-            "id": channel.id,
-            "channel_id": channel.id,
-            "branch": workspace["branch"],
-            "plan": plan_id,
-            "model": model,
-            "agent": display_agent,
-            "status": status,
-            "summary": channel.name,
-            "device": device_id or "local",
-            "workspace": cwd,
-            "pct": 40 if status == "working" else 0,
-            "files": 0,
-            "add": 0,
-            "del": 0,
-            "updated": last_active,
-        })
-        project["plans"].append({
-            "id": plan_id,
-            "channel_id": channel.id,
-            "title": channel.name,
-            "status": "in-progress" if status in {"working", "blocked"} else "draft",
-            "steps": 1,
-            "doneSteps": 0,
-            "model": model,
-            "updated": last_active,
-        })
-        project["activity"].append(f"{display_agent} {status} in {channel.name}")
-
-    out_projects = []
-    for project in projects.values():
         project["activity"] = project["activity"][:4] or ["No recent agent activity"]
         out_projects.append(project)
 
@@ -1072,9 +1105,69 @@ def _dashboard_snapshot(facade: "E2EEHandler") -> dict[str, Any]:
         project.pop("_last_active_ts", None)
     return {
         "schema": "dashboard.snapshot.v1",
-        "source": "channels",
+        "source": "projects",
         "generated_at": time.time(),
         "projects": out_projects,
+    }
+
+
+def _ensure_project_graph(facade: "E2EEHandler") -> None:
+    channels_in = facade.store.list_channels()
+    agent_server = getattr(facade, "_agent_server", None)
+
+    for channel in channels_in:
+        agent_channel = agent_server.store.get_channel(channel.id) if agent_server else None
+        cwd = str(getattr(agent_channel, "working_directory", "") or "")
+        workspace = _workspace_identity(channel.name, cwd)
+        project = facade.store.upsert_project(
+            workspace["id"],
+            workspace["name"],
+            root_path=workspace["root_path"],
+            repo=workspace["repo"],
+            default_branch=workspace["branch"] or "main",
+            color=_color_for(workspace["id"]),
+        )
+        status = "idle"
+        if agent_channel and getattr(agent_channel, "status", "") == "error":
+            status = "blocked"
+        facade.store.upsert_worktree(
+            channel.id,
+            project.id,
+            channel.name,
+            path=cwd,
+            branch=workspace["branch"] or "workspace",
+            status=status,
+            channel_id=channel.id,
+        )
+
+
+def _project_primitive_payload(project: Any, worktrees: list[Any]) -> dict[str, Any]:
+    return {
+        "id": project.id,
+        "name": project.name,
+        "root_path": project.root_path,
+        "repo": project.repo,
+        "default_branch": project.default_branch,
+        "color": project.color,
+        "created_at": project.created_at,
+        "updated_at": project.updated_at,
+        "worktree_count": len(worktrees),
+    }
+
+
+def _worktree_primitive_payload(worktree: Any) -> dict[str, Any]:
+    return {
+        "id": worktree.id,
+        "project_id": worktree.project_id,
+        "channel_id": worktree.channel_id,
+        "name": worktree.name,
+        "path": worktree.path,
+        "branch": worktree.branch,
+        "base_ref": worktree.base_ref,
+        "head_ref": worktree.head_ref,
+        "status": worktree.status,
+        "created_at": worktree.created_at,
+        "updated_at": worktree.updated_at,
     }
 
 
@@ -1083,24 +1176,28 @@ def _workspace_identity(channel_name: str, working_directory: str) -> dict[str, 
     root, branch = _git_workspace(cwd)
     if root:
         name = root.name or "workspace"
+        key = str(root)
         return {
-            "key": str(root),
-            "id": _slug(name),
+            "key": key,
+            "id": _workspace_project_id(key, name),
             "name": name,
             "description": "Repository workspace",
             "repo": name,
+            "root_path": key,
             "branch": branch or "main",
         }
 
     if cwd:
         path = Path(cwd).resolve()
         name = path.name or channel_name or "workspace"
+        key = str(path)
         return {
-            "key": str(path),
-            "id": _slug(name),
+            "key": key,
+            "id": _workspace_project_id(key, name),
             "name": name,
             "description": "Local workspace",
             "repo": name,
+            "root_path": key,
             "branch": "workspace",
         }
 
@@ -1110,8 +1207,15 @@ def _workspace_identity(channel_name: str, working_directory: str) -> dict[str, 
         "name": "Channels",
         "description": "Bridge channels",
         "repo": "local/channels",
+        "root_path": "",
         "branch": "main",
     }
+
+
+def _workspace_project_id(key: str, name: str) -> str:
+    if key == "channels":
+        return "channels"
+    return f"{_slug(name)}-{hashlib.sha256(key.encode()).hexdigest()[:6]}"
 
 
 def _git_workspace(cwd: str) -> tuple[Path | None, str]:

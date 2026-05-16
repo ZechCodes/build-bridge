@@ -128,10 +128,62 @@ async def test_v1_dashboard_snapshot_derives_projects_from_channels(tmp_path: Pa
     assert response["kind"] == "response"
     assert response["type"] == "dashboard.snapshot"
     assert response["payload"]["schema"] == "dashboard.snapshot.v1"
+    assert response["payload"]["source"] == "projects"
     assert response["payload"]["projects"][0]["id"] == "channels"
+    assert response["payload"]["projects"][0]["worktrees"][0]["project_id"] == "channels"
     assert response["payload"]["projects"][0]["plans"][0]["channel_id"] == "ch-1"
     assert response["payload"]["projects"][0]["worktrees"][0]["id"] == "ch-1"
     assert response["payload"]["projects"][0]["worktrees"][0]["summary"] == "Tenant middleware"
+    assert handler.store.get_project("channels") is not None
+    assert handler.store.get_worktree("ch-1") is not None
+
+
+@pytest.mark.asyncio
+async def test_v1_project_and_worktree_list_use_primitives(tmp_path: Path) -> None:
+    handler = _handler(tmp_path)
+    handler.store.upsert_project(
+        "proj-1",
+        "api-gateway",
+        root_path="/work/api-gateway",
+        repo="api-gateway",
+        default_branch="main",
+        color="#6366f1",
+    )
+    handler.store.upsert_worktree(
+        "wt-1",
+        "proj-1",
+        "Tenant middleware",
+        path="/work/api-gateway",
+        branch="agents/tenant",
+        status="idle",
+        channel_id="ch-1",
+    )
+    sent = _capture(handler)
+
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {"frame_type": "data", "payload": _v1_request("req-projects", "project.list")},
+        object(),
+    )
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {
+            "frame_type": "data",
+            "payload": _v1_request(
+                "req-worktrees",
+                "worktree.list",
+                payload={"project_id": "proj-1"},
+            ),
+        },
+        object(),
+    )
+
+    assert sent[0]["type"] == "project.list"
+    assert sent[0]["payload"]["projects"][0]["id"] == "proj-1"
+    assert sent[0]["payload"]["projects"][0]["worktree_count"] == 1
+    assert sent[1]["type"] == "worktree.list"
+    assert sent[1]["payload"]["worktrees"][0]["id"] == "wt-1"
+    assert sent[1]["payload"]["worktrees"][0]["project_id"] == "proj-1"
 
 
 @pytest.mark.asyncio

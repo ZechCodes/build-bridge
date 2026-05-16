@@ -300,7 +300,7 @@ Request:
 {
   "client": { "name": "build-web", "version": "<string>" },
   "accept_versions": [1],
-  "features": ["streaming", "uploads.v2"]
+  "features": ["streaming", "uploads.v2", "projects.v1"]
 }
 ```
 
@@ -309,7 +309,7 @@ Response:
 ```jsonc
 {
   "version": 1,
-  "features": ["streaming", "uploads.v2", "dashboard.snapshot"],
+  "features": ["streaming", "uploads.v2", "projects.v1", "dashboard.snapshot"],
   "limits": { "max_encrypted_frame_bytes": 262144 }
 }
 ```
@@ -330,7 +330,76 @@ Response:
 { "cancelled": true }
 ```
 
-### 5.1 Dashboard
+### 5.1 Projects
+
+Projects are durable workspace/repository containers. Worktrees are durable
+children of projects. A worktree may have a `channel_id` when an agent
+conversation is attached, but channels remain the chat/control primitive rather
+than the project identity.
+
+#### `project.list`
+
+Target: device
+
+Request:
+
+```jsonc
+{}
+```
+
+Response:
+
+```jsonc
+{
+  "projects": [
+    {
+      "id": "<project id>",
+      "name": "<repository or workspace>",
+      "root_path": "<absolute path>?",
+      "repo": "<string>",
+      "default_branch": "main",
+      "color": "#6366f1",
+      "created_at": 1715788800.0,
+      "updated_at": 1715788800.0,
+      "worktree_count": 2
+    }
+  ]
+}
+```
+
+#### `worktree.list`
+
+Target: device
+
+Request:
+
+```jsonc
+{ "project_id": "<project id>?" }
+```
+
+Response:
+
+```jsonc
+{
+  "worktrees": [
+    {
+      "id": "<worktree id>",
+      "project_id": "<project id>",
+      "channel_id": "<channel id>?",
+      "name": "<string>",
+      "path": "<absolute path>?",
+      "branch": "<string>",
+      "base_ref": "<git ref>?",
+      "head_ref": "<git ref>?",
+      "status": "working" | "idle" | "blocked" | "closed",
+      "created_at": 1715788800.0,
+      "updated_at": 1715788800.0
+    }
+  ]
+}
+```
+
+### 5.2 Dashboard
 
 #### `dashboard.snapshot`
 
@@ -347,7 +416,7 @@ Response:
 ```jsonc
 {
   "schema": "dashboard.snapshot.v1",
-  "source": "channels",
+  "source": "projects",
   "generated_at": 1715788800.0,
   "projects": [
     {
@@ -357,16 +426,18 @@ Response:
       "repo": "<string>",
       "branch": "<string>",
       "color": "#6366f1",
+      "root_path": "<absolute path>?",
       "needsYou": 0,
       "runningAgents": 1,
       "queued": 0,
       "lastActive": "2m",
       "worktrees": [
         {
-          "id": "<channel id>",
-          "channel_id": "<channel id>",
+          "id": "<worktree id>",
+          "project_id": "<project id>",
+          "channel_id": "<channel id>?",
           "branch": "<git branch or workspace>",
-          "plan": "plan-<channel prefix>",
+          "plan": "plan-<worktree prefix>",
           "model": "<model>",
           "agent": "<display agent>",
           "status": "working" | "idle" | "blocked",
@@ -382,8 +453,10 @@ Response:
       ],
       "plans": [
         {
-          "id": "plan-<channel prefix>",
-          "channel_id": "<channel id>",
+          "id": "plan-<worktree prefix>",
+          "project_id": "<project id>",
+          "worktree_id": "<worktree id>",
+          "channel_id": "<channel id>?",
           "title": "<channel name>",
           "status": "in-progress" | "draft",
           "steps": 1,
@@ -398,11 +471,11 @@ Response:
 }
 ```
 
-This snapshot is intentionally derived from channel and agent metadata. Richer
-diff, plan document, inbox, and complication fields are layered in by later
-methods.
+This snapshot reads project/worktree primitives, then joins current channel and
+agent metadata for live status. Existing channel-only data is lazily migrated
+into one project/worktree graph per workspace.
 
-### 5.2 Channels
+### 5.3 Channels
 
 #### `channel.list`
 
@@ -1308,7 +1381,7 @@ The `protocol.hello` payload is defined in §5.0.
 
 | v0 action | v1 method/event |
 |-----------|-----------------|
-| derived from `list_channels` + agent metadata | `dashboard.snapshot` |
+| persisted project/worktree graph + agent metadata | `project.list`, `worktree.list`, `dashboard.snapshot` |
 | `list_channels` | `channel.list` |
 | `create_channel` | `channel.create` |
 | `rename_channel` | `channel.update` |
