@@ -113,6 +113,28 @@ async def test_v1_channel_list_wraps_v0_handler_output(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_v1_dashboard_snapshot_derives_projects_from_channels(tmp_path: Path) -> None:
+    handler = _handler(tmp_path)
+    handler.store.create_channel("ch-1", "Tenant middleware")
+    sent = _capture(handler)
+
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {"frame_type": "data", "payload": _v1_request("req-dash", "dashboard.snapshot")},
+        object(),
+    )
+
+    response = sent[0]
+    assert response["kind"] == "response"
+    assert response["type"] == "dashboard.snapshot"
+    assert response["payload"]["schema"] == "dashboard.snapshot.v1"
+    assert response["payload"]["projects"][0]["id"] == "channels"
+    assert response["payload"]["projects"][0]["plans"][0]["channel_id"] == "ch-1"
+    assert response["payload"]["projects"][0]["worktrees"][0]["id"] == "ch-1"
+    assert response["payload"]["projects"][0]["worktrees"][0]["summary"] == "Tenant middleware"
+
+
+@pytest.mark.asyncio
 async def test_v1_unknown_method_returns_normalized_error(tmp_path: Path) -> None:
     handler = _handler(tmp_path)
     sent = _capture(handler)

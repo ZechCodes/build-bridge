@@ -19,8 +19,12 @@ from __future__ import annotations
 import logging
 import asyncio
 import base64
+from datetime import datetime, timezone
 import hashlib
 import json
+import os
+import re
+import time
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -298,7 +302,7 @@ class V1Protocol:
                 session, ws, app,
                 payload={
                     "version": V1_VERSION,
-                    "features": ["streaming", "uploads.v2"],
+                    "features": ["streaming", "uploads.v2", "dashboard.snapshot"],
                     "limits": {"max_encrypted_frame_bytes": 262144},
                 },
             )
@@ -307,9 +311,9 @@ class V1Protocol:
             await self._send_response(session, ws, app, payload={"cancelled": False})
             return
 
-        upload_handler = getattr(self, f"_handle_{method.replace('.', '_')}", None)
-        if upload_handler:
-            await upload_handler(session, app, ws)
+        direct_handler = getattr(self, f"_handle_{method.replace('.', '_')}", None)
+        if direct_handler:
+            await direct_handler(session, app, ws)
             return
 
         calls = self._v1_to_v0_calls(app)
@@ -643,6 +647,14 @@ class V1Protocol:
             raise V1Error("unknown_method", f"unknown adapted action: {action}")
         await handler(ctx, session, payload, ws)
 
+    async def _handle_dashboard_snapshot(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
+        await self._send_response(
+            session,
+            ws,
+            app,
+            payload=_dashboard_snapshot(self.facade),
+        )
+
     async def _handle_upload_create(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
         payload = _payload(app)
         upload_id = payload.get("upload_id") or _new_id("upl")
@@ -959,6 +971,244 @@ class V1Protocol:
 
     async def _send_v1_payload(self, session: "ActiveSession", ws: Any, payload: dict[str, Any]) -> None:
         await self.facade._send_frame(session, ws, payload)
+
+
+_DASHBOARD_COLORS = (
+    "#6366f1",
+    "#0891b2",
+    "#9333ea",
+    "#0f766e",
+    "#e11d48",
+    "#d97706",
+)
+
+
+def _dashboard_snapshot(facade: "E2EEHandler") -> dict[str, Any]:
+    projects: dict[str, dict[str, Any]] = {}
+    channels_in = facade.store.list_channels()
+    agent_server = getattr(facade, "_agent_server", None)
+    agent_spawner = getattr(facade, "_agent_spawner", None)
+    device_id = str(getattr(facade.config, "device_id", ""))
+
+    for channel in channels_in:
+        agent_channel = agent_server.store.get_channel(channel.id) if agent_server else None
+        cwd = str(getattr(agent_channel, "working_directory", "") or "")
+        workspace = _workspace_identity(channel.name, cwd)
+        project = projects.get(workspace["key"])
+        if project is None:
+            project = {
+                "id": workspace["id"],
+                "name": workspace["name"],
+                "description": workspace["description"],
+                "repo": workspace["repo"],
+                "branch": workspace["branch"],
+                "color": _color_for(workspace["id"]),
+                "needsYou": 0,
+                "runningAgents": 0,
+                "queued": 0,
+                "lastActive": "now",
+                "worktrees": [],
+                "plans": [],
+                "activity": [],
+                "_last_active_ts": 0.0,
+            }
+            projects[workspace["key"]] = project
+
+        is_running = bool(
+            agent_channel
+            and agent_spawner
+            and agent_spawner.is_running(channel.id)
+            and getattr(agent_channel, "status", "") == "active"
+        )
+        status = _dashboard_worktree_status(agent_channel, is_running)
+        updated_at = getattr(agent_channel, "updated_at", None) if agent_channel else channel.created_at
+        last_active_ts = _timestamp(updated_at) or _timestamp(channel.created_at) or time.time()
+        last_active = _relative_time(last_active_ts)
+        plan_id = f"plan-{channel.id[:8]}"
+        model = str(getattr(agent_channel, "model", "") or getattr(agent_channel, "harness", "") or "device")
+        display_agent = _display_agent(agent_channel)
+
+        if status == "working":
+            project["runningAgents"] += 1
+
+        project["_last_active_ts"] = max(float(project["_last_active_ts"]), last_active_ts)
+        project["lastActive"] = _relative_time(float(project["_last_active_ts"]))
+        project["worktrees"].append({
+            "id": channel.id,
+            "channel_id": channel.id,
+            "branch": workspace["branch"],
+            "plan": plan_id,
+            "model": model,
+            "agent": display_agent,
+            "status": status,
+            "summary": channel.name,
+            "device": device_id or "local",
+            "workspace": cwd,
+            "pct": 40 if status == "working" else 0,
+            "files": 0,
+            "add": 0,
+            "del": 0,
+            "updated": last_active,
+        })
+        project["plans"].append({
+            "id": plan_id,
+            "channel_id": channel.id,
+            "title": channel.name,
+            "status": "in-progress" if status in {"working", "blocked"} else "draft",
+            "steps": 1,
+            "doneSteps": 0,
+            "model": model,
+            "updated": last_active,
+        })
+        project["activity"].append(f"{display_agent} {status} in {channel.name}")
+
+    out_projects = []
+    for project in projects.values():
+        project["activity"] = project["activity"][:4] or ["No recent agent activity"]
+        out_projects.append(project)
+
+    out_projects.sort(key=lambda item: float(item.get("_last_active_ts", 0)), reverse=True)
+    for project in out_projects:
+        project.pop("_last_active_ts", None)
+    return {
+        "schema": "dashboard.snapshot.v1",
+        "source": "channels",
+        "generated_at": time.time(),
+        "projects": out_projects,
+    }
+
+
+def _workspace_identity(channel_name: str, working_directory: str) -> dict[str, str]:
+    cwd = os.path.expanduser(working_directory) if working_directory else ""
+    root, branch = _git_workspace(cwd)
+    if root:
+        name = root.name or "workspace"
+        return {
+            "key": str(root),
+            "id": _slug(name),
+            "name": name,
+            "description": "Repository workspace",
+            "repo": name,
+            "branch": branch or "main",
+        }
+
+    if cwd:
+        path = Path(cwd).resolve()
+        name = path.name or channel_name or "workspace"
+        return {
+            "key": str(path),
+            "id": _slug(name),
+            "name": name,
+            "description": "Local workspace",
+            "repo": name,
+            "branch": "workspace",
+        }
+
+    return {
+        "key": "channels",
+        "id": "channels",
+        "name": "Channels",
+        "description": "Bridge channels",
+        "repo": "local/channels",
+        "branch": "main",
+    }
+
+
+def _git_workspace(cwd: str) -> tuple[Path | None, str]:
+    if not cwd:
+        return None, ""
+    try:
+        path = Path(cwd).expanduser().resolve()
+    except OSError:
+        return None, ""
+    if path.is_file():
+        path = path.parent
+    candidates = (path, *path.parents)
+    for candidate in candidates:
+        git_marker = candidate / ".git"
+        if git_marker.exists():
+            return candidate, _git_branch(git_marker)
+    return None, ""
+
+
+def _git_branch(git_marker: Path) -> str:
+    try:
+        git_dir = git_marker
+        if git_marker.is_file():
+            text = git_marker.read_text(errors="ignore").strip()
+            if text.startswith("gitdir:"):
+                raw = text.split(":", 1)[1].strip()
+                git_dir = Path(raw)
+                if not git_dir.is_absolute():
+                    git_dir = (git_marker.parent / git_dir).resolve()
+        head = (git_dir / "HEAD").read_text(errors="ignore").strip()
+    except OSError:
+        return "main"
+
+    if head.startswith("ref:"):
+        ref = head.split(":", 1)[1].strip()
+        prefix = "refs/heads/"
+        return ref[len(prefix):] if ref.startswith(prefix) else ref
+    return head[:7] if head else "main"
+
+
+def _dashboard_worktree_status(agent_channel: Any, is_running: bool) -> str:
+    status = str(getattr(agent_channel, "status", "") or "")
+    if status == "error":
+        return "blocked"
+    if is_running:
+        return "working"
+    return "idle"
+
+
+def _display_agent(agent_channel: Any) -> str:
+    if not agent_channel:
+        return "device"
+    return str(
+        getattr(agent_channel, "model", "")
+        or getattr(agent_channel, "harness", "")
+        or "device"
+    )
+
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "workspace"
+
+
+def _color_for(value: str) -> str:
+    digest = int(hashlib.sha256(value.encode()).hexdigest()[:8], 16)
+    return _DASHBOARD_COLORS[digest % len(_DASHBOARD_COLORS)]
+
+
+def _timestamp(value: Any) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str) and value:
+        try:
+            text = value[:-1] + "+00:00" if value.endswith("Z") else value
+            return datetime.fromisoformat(text).timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _relative_time(timestamp: float) -> str:
+    if not timestamp:
+        return "now"
+    seconds = max(0, int(datetime.now(timezone.utc).timestamp() - timestamp))
+    if seconds < 60:
+        return "now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h"
+    days = hours // 24
+    return f"{days}d"
 
 
 def _response_meta(app: dict[str, Any]) -> dict[str, Any]:

@@ -309,7 +309,7 @@ Response:
 ```jsonc
 {
   "version": 1,
-  "features": ["streaming", "uploads.v2"],
+  "features": ["streaming", "uploads.v2", "dashboard.snapshot"],
   "limits": { "max_encrypted_frame_bytes": 262144 }
 }
 ```
@@ -330,7 +330,79 @@ Response:
 { "cancelled": true }
 ```
 
-### 5.1 Channels
+### 5.1 Dashboard
+
+#### `dashboard.snapshot`
+
+Target: device
+
+Request:
+
+```jsonc
+{}
+```
+
+Response:
+
+```jsonc
+{
+  "schema": "dashboard.snapshot.v1",
+  "source": "channels",
+  "generated_at": 1715788800.0,
+  "projects": [
+    {
+      "id": "<slug>",
+      "name": "<repository or workspace>",
+      "description": "<string>",
+      "repo": "<string>",
+      "branch": "<string>",
+      "color": "#6366f1",
+      "needsYou": 0,
+      "runningAgents": 1,
+      "queued": 0,
+      "lastActive": "2m",
+      "worktrees": [
+        {
+          "id": "<channel id>",
+          "channel_id": "<channel id>",
+          "branch": "<git branch or workspace>",
+          "plan": "plan-<channel prefix>",
+          "model": "<model>",
+          "agent": "<display agent>",
+          "status": "working" | "idle" | "blocked",
+          "summary": "<channel name>",
+          "device": "<device id>",
+          "workspace": "<absolute path>?",
+          "pct": 40,
+          "files": 0,
+          "add": 0,
+          "del": 0,
+          "updated": "2m"
+        }
+      ],
+      "plans": [
+        {
+          "id": "plan-<channel prefix>",
+          "channel_id": "<channel id>",
+          "title": "<channel name>",
+          "status": "in-progress" | "draft",
+          "steps": 1,
+          "doneSteps": 0,
+          "model": "<model>",
+          "updated": "2m"
+        }
+      ],
+      "activity": ["<string>"]
+    }
+  ]
+}
+```
+
+This snapshot is intentionally derived from channel and agent metadata. Richer
+diff, plan document, inbox, and complication fields are layered in by later
+methods.
+
+### 5.2 Channels
 
 #### `channel.list`
 
@@ -1236,6 +1308,7 @@ The `protocol.hello` payload is defined in §5.0.
 
 | v0 action | v1 method/event |
 |-----------|-----------------|
+| derived from `list_channels` + agent metadata | `dashboard.snapshot` |
 | `list_channels` | `channel.list` |
 | `create_channel` | `channel.create` |
 | `rename_channel` | `channel.update` |
