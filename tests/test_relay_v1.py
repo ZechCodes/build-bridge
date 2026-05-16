@@ -136,10 +136,11 @@ async def test_v1_dashboard_snapshot_derives_projects_from_channels(tmp_path: Pa
     assert response["payload"]["projects"][0]["worktrees"][0]["summary"] == "Tenant middleware"
     assert handler.store.get_project("channels") is not None
     assert handler.store.get_worktree("ch-1") is not None
+    assert handler.store.get_plan("plan-ch-1") is not None
 
 
 @pytest.mark.asyncio
-async def test_v1_project_and_worktree_list_use_primitives(tmp_path: Path) -> None:
+async def test_v1_project_worktree_and_plan_list_use_primitives(tmp_path: Path) -> None:
     handler = _handler(tmp_path)
     handler.store.upsert_project(
         "proj-1",
@@ -157,6 +158,17 @@ async def test_v1_project_and_worktree_list_use_primitives(tmp_path: Path) -> No
         branch="agents/tenant",
         status="idle",
         channel_id="ch-1",
+    )
+    handler.store.upsert_plan(
+        "plan-1",
+        "proj-1",
+        "Migrate tenant middleware",
+        worktree_id="wt-1",
+        channel_id="ch-1",
+        status="queued",
+        step_count=3,
+        done_step_count=1,
+        model="claude-sonnet",
     )
     sent = _capture(handler)
 
@@ -177,6 +189,18 @@ async def test_v1_project_and_worktree_list_use_primitives(tmp_path: Path) -> No
         },
         object(),
     )
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {
+            "frame_type": "data",
+            "payload": _v1_request(
+                "req-plans",
+                "plan.list",
+                payload={"worktree_id": "wt-1"},
+            ),
+        },
+        object(),
+    )
 
     assert sent[0]["type"] == "project.list"
     assert sent[0]["payload"]["projects"][0]["id"] == "proj-1"
@@ -184,6 +208,9 @@ async def test_v1_project_and_worktree_list_use_primitives(tmp_path: Path) -> No
     assert sent[1]["type"] == "worktree.list"
     assert sent[1]["payload"]["worktrees"][0]["id"] == "wt-1"
     assert sent[1]["payload"]["worktrees"][0]["project_id"] == "proj-1"
+    assert sent[2]["type"] == "plan.list"
+    assert sent[2]["payload"]["plans"][0]["id"] == "plan-1"
+    assert sent[2]["payload"]["plans"][0]["worktree_id"] == "wt-1"
 
 
 @pytest.mark.asyncio

@@ -302,7 +302,7 @@ class V1Protocol:
                 session, ws, app,
                 payload={
                     "version": V1_VERSION,
-                    "features": ["streaming", "uploads.v2", "projects.v1", "dashboard.snapshot"],
+                    "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1", "dashboard.snapshot"],
                     "limits": {"max_encrypted_frame_bytes": 262144},
                 },
             )
@@ -681,6 +681,22 @@ class V1Protocol:
             payload={"worktrees": [_worktree_primitive_payload(worktree) for worktree in worktrees]},
         )
 
+    async def _handle_plan_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
+        _ensure_project_graph(self.facade)
+        payload = _payload(app)
+        project_id = payload.get("project_id")
+        worktree_id = payload.get("worktree_id")
+        plans = self.facade.store.list_plans(
+            project_id if isinstance(project_id, str) else None,
+            worktree_id if isinstance(worktree_id, str) else None,
+        )
+        await self._send_response(
+            session,
+            ws,
+            app,
+            payload={"plans": [_plan_primitive_payload(plan) for plan in plans]},
+        )
+
     async def _handle_upload_create(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
         payload = _payload(app)
         upload_id = payload.get("upload_id") or _new_id("upl")
@@ -1035,7 +1051,17 @@ def _dashboard_snapshot(facade: "E2EEHandler") -> dict[str, Any]:
             "activity": [],
             "_last_active_ts": project_record.updated_at,
         }
-        for worktree in facade.store.list_worktrees(project_record.id):
+        worktrees = facade.store.list_worktrees(project_record.id)
+        plans = facade.store.list_plans(project_record.id)
+        plans_by_worktree: dict[str, list[Any]] = {}
+        worktree_status: dict[str, str] = {}
+        worktree_updated_at: dict[str, float] = {}
+        model_by_channel: dict[str, str] = {}
+        for plan in plans:
+            if plan.worktree_id:
+                plans_by_worktree.setdefault(plan.worktree_id, []).append(plan)
+
+        for worktree in worktrees:
             channel = channel_by_id.get(worktree.channel_id or "")
             agent_channel = (
                 agent_server.store.get_channel(worktree.channel_id)
@@ -1059,10 +1085,15 @@ def _dashboard_snapshot(facade: "E2EEHandler") -> dict[str, Any]:
             last_active = _relative_time(updated_at)
             model = str(getattr(agent_channel, "model", "") or getattr(agent_channel, "harness", "") or "device")
             display_agent = _display_agent(agent_channel)
-            plan_id = f"plan-{worktree.id[:8]}"
+            current_plan = plans_by_worktree.get(worktree.id, [None])[0]
+            plan_id = current_plan.id if current_plan else ""
 
             if status == "working":
                 project["runningAgents"] += 1
+            worktree_status[worktree.id] = status
+            worktree_updated_at[worktree.id] = updated_at
+            if worktree.channel_id:
+                model_by_channel[worktree.channel_id] = model
             project["_last_active_ts"] = max(float(project["_last_active_ts"]), updated_at)
             project["lastActive"] = _relative_time(float(project["_last_active_ts"]))
             project["worktrees"].append({
@@ -1083,18 +1114,30 @@ def _dashboard_snapshot(facade: "E2EEHandler") -> dict[str, Any]:
                 "del": 0,
                 "updated": last_active,
             })
+
+        for plan in plans:
+            wt_status = worktree_status.get(plan.worktree_id or "", "idle")
+            updated_at = max(plan.updated_at, worktree_updated_at.get(plan.worktree_id or "", 0))
+            project["_last_active_ts"] = max(float(project["_last_active_ts"]), updated_at)
+            project["lastActive"] = _relative_time(float(project["_last_active_ts"]))
             project["plans"].append({
-                "id": plan_id,
-                "project_id": worktree.project_id,
-                "worktree_id": worktree.id,
-                "channel_id": worktree.channel_id,
-                "title": worktree.name,
-                "status": "in-progress" if status in {"working", "blocked"} else "draft",
-                "steps": 1,
-                "doneSteps": 0,
-                "model": model,
-                "updated": last_active,
+                "id": plan.id,
+                "project_id": plan.project_id,
+                "worktree_id": plan.worktree_id,
+                "channel_id": plan.channel_id,
+                "title": plan.title,
+                "status": _dashboard_plan_status(plan.status, wt_status),
+                "steps": plan.step_count,
+                "doneSteps": plan.done_step_count,
+                "model": plan.model or model_by_channel.get(plan.channel_id or "", "device"),
+                "updated": _relative_time(updated_at),
             })
+
+        for worktree in worktrees:
+            status = worktree_status.get(worktree.id, worktree.status)
+            display_agent = "device"
+            if worktree.channel_id and agent_server:
+                display_agent = _display_agent(agent_server.store.get_channel(worktree.channel_id))
             project["activity"].append(f"{display_agent} {status} in {worktree.name}")
 
         project["activity"] = project["activity"][:4] or ["No recent agent activity"]
@@ -1130,7 +1173,7 @@ def _ensure_project_graph(facade: "E2EEHandler") -> None:
         status = "idle"
         if agent_channel and getattr(agent_channel, "status", "") == "error":
             status = "blocked"
-        facade.store.upsert_worktree(
+        worktree = facade.store.upsert_worktree(
             channel.id,
             project.id,
             channel.name,
@@ -1139,6 +1182,19 @@ def _ensure_project_graph(facade: "E2EEHandler") -> None:
             status=status,
             channel_id=channel.id,
         )
+        plan_id = f"plan-{worktree.id[:8]}"
+        if not facade.store.get_plan(plan_id):
+            facade.store.upsert_plan(
+                plan_id,
+                project.id,
+                channel.name,
+                worktree_id=worktree.id,
+                channel_id=channel.id,
+                status="draft",
+                step_count=1,
+                done_step_count=0,
+                model=str(getattr(agent_channel, "model", "") or ""),
+            )
 
 
 def _project_primitive_payload(project: Any, worktrees: list[Any]) -> dict[str, Any]:
@@ -1169,6 +1225,31 @@ def _worktree_primitive_payload(worktree: Any) -> dict[str, Any]:
         "created_at": worktree.created_at,
         "updated_at": worktree.updated_at,
     }
+
+
+def _plan_primitive_payload(plan: Any) -> dict[str, Any]:
+    return {
+        "id": plan.id,
+        "project_id": plan.project_id,
+        "worktree_id": plan.worktree_id,
+        "channel_id": plan.channel_id,
+        "title": plan.title,
+        "status": plan.status,
+        "body": plan.body,
+        "step_count": plan.step_count,
+        "done_step_count": plan.done_step_count,
+        "model": plan.model,
+        "created_at": plan.created_at,
+        "updated_at": plan.updated_at,
+    }
+
+
+def _dashboard_plan_status(plan_status: str, worktree_status: str) -> str:
+    if plan_status not in {"draft", "queued"}:
+        return plan_status
+    if worktree_status in {"working", "blocked"}:
+        return "in-progress"
+    return plan_status
 
 
 def _workspace_identity(channel_name: str, working_directory: str) -> dict[str, str]:

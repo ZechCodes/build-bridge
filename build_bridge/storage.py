@@ -60,6 +60,22 @@ class Worktree:
     head_ref: str = ""
 
 
+@dataclass
+class Plan:
+    id: str
+    project_id: str
+    title: str
+    status: str
+    created_at: float
+    updated_at: float
+    worktree_id: str | None = None
+    channel_id: str | None = None
+    body: str = ""
+    step_count: int = 1
+    done_step_count: int = 0
+    model: str = ""
+
+
 class MessageStore:
     """SQLite-backed local message store for the device."""
 
@@ -122,6 +138,27 @@ class MessageStore:
 
             CREATE INDEX IF NOT EXISTS idx_worktrees_project
                 ON worktrees(project_id, updated_at);
+
+            CREATE TABLE IF NOT EXISTS plans (
+                id              TEXT PRIMARY KEY,
+                project_id      TEXT NOT NULL REFERENCES projects(id),
+                worktree_id     TEXT REFERENCES worktrees(id),
+                channel_id      TEXT,
+                title           TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'draft',
+                body            TEXT NOT NULL DEFAULT '',
+                step_count      INTEGER NOT NULL DEFAULT 1,
+                done_step_count INTEGER NOT NULL DEFAULT 0,
+                model           TEXT NOT NULL DEFAULT '',
+                created_at      REAL NOT NULL,
+                updated_at      REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_plans_project
+                ON plans(project_id, updated_at);
+
+            CREATE INDEX IF NOT EXISTS idx_plans_worktree
+                ON plans(worktree_id, updated_at);
         """)
         # Migration: add attachments column if missing (existing databases).
         try:
@@ -298,7 +335,115 @@ class MessageStore:
             "UPDATE worktrees SET channel_id = NULL, status = 'idle', updated_at = ? WHERE channel_id = ?",
             (time.time(), channel_id),
         )
+        self.db.execute(
+            "UPDATE plans SET channel_id = NULL, status = 'draft', updated_at = ? WHERE channel_id = ?",
+            (time.time(), channel_id),
+        )
         self.db.commit()
+
+    def upsert_plan(
+        self,
+        plan_id: str,
+        project_id: str,
+        title: str,
+        *,
+        worktree_id: str | None = None,
+        channel_id: str | None = None,
+        status: str = "draft",
+        body: str = "",
+        step_count: int = 1,
+        done_step_count: int = 0,
+        model: str = "",
+    ) -> Plan:
+        """Create or update a plan primitive."""
+        now = time.time()
+        existing = self.get_plan(plan_id)
+        created_at = existing.created_at if existing else now
+        changed = not existing or (
+            existing.project_id != project_id
+            or existing.worktree_id != worktree_id
+            or existing.channel_id != channel_id
+            or existing.title != title
+            or existing.status != status
+            or existing.body != body
+            or existing.step_count != step_count
+            or existing.done_step_count != done_step_count
+            or existing.model != model
+        )
+        updated_at = now if changed else existing.updated_at
+        self.db.execute(
+            """INSERT INTO plans
+               (id, project_id, worktree_id, channel_id, title, status, body, step_count, done_step_count, model, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   project_id = excluded.project_id,
+                   worktree_id = excluded.worktree_id,
+                   channel_id = excluded.channel_id,
+                   title = excluded.title,
+                   status = excluded.status,
+                   body = excluded.body,
+                   step_count = excluded.step_count,
+                   done_step_count = excluded.done_step_count,
+                   model = excluded.model,
+                   updated_at = excluded.updated_at""",
+            (
+                plan_id,
+                project_id,
+                worktree_id,
+                channel_id,
+                title,
+                status,
+                body,
+                step_count,
+                done_step_count,
+                model,
+                created_at,
+                updated_at,
+            ),
+        )
+        self.db.commit()
+        return Plan(
+            id=plan_id,
+            project_id=project_id,
+            worktree_id=worktree_id,
+            channel_id=channel_id,
+            title=title,
+            status=status,
+            body=body,
+            step_count=step_count,
+            done_step_count=done_step_count,
+            model=model,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+
+    def get_plan(self, plan_id: str) -> Plan | None:
+        row = self.db.execute(
+            "SELECT * FROM plans WHERE id = ?",
+            (plan_id,),
+        ).fetchone()
+        return self._row_to_plan(row) if row else None
+
+    def list_plans(
+        self,
+        project_id: str | None = None,
+        worktree_id: str | None = None,
+    ) -> list[Plan]:
+        if worktree_id:
+            rows = self.db.execute(
+                "SELECT * FROM plans WHERE worktree_id = ? ORDER BY updated_at DESC",
+                (worktree_id,),
+            ).fetchall()
+        elif project_id:
+            rows = self.db.execute(
+                "SELECT * FROM plans WHERE project_id = ? ORDER BY updated_at DESC",
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM plans ORDER BY updated_at DESC"
+            ).fetchall()
+        return [self._row_to_plan(row) for row in rows]
 
     @staticmethod
     def _row_to_project(row: sqlite3.Row) -> Project:
@@ -309,6 +454,23 @@ class MessageStore:
             repo=row["repo"],
             default_branch=row["default_branch"],
             color=row["color"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _row_to_plan(row: sqlite3.Row) -> Plan:
+        return Plan(
+            id=row["id"],
+            project_id=row["project_id"],
+            worktree_id=row["worktree_id"],
+            channel_id=row["channel_id"],
+            title=row["title"],
+            status=row["status"],
+            body=row["body"],
+            step_count=row["step_count"],
+            done_step_count=row["done_step_count"],
+            model=row["model"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -370,6 +532,10 @@ class MessageStore:
         """Delete a channel and all its messages."""
         self.db.execute(
             "UPDATE worktrees SET channel_id = NULL, status = 'idle', updated_at = ? WHERE channel_id = ?",
+            (time.time(), channel_id),
+        )
+        self.db.execute(
+            "UPDATE plans SET channel_id = NULL, status = 'draft', updated_at = ? WHERE channel_id = ?",
             (time.time(), channel_id),
         )
         self.db.execute(

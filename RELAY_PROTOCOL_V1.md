@@ -300,7 +300,7 @@ Request:
 {
   "client": { "name": "build-web", "version": "<string>" },
   "accept_versions": [1],
-  "features": ["streaming", "uploads.v2", "projects.v1"]
+  "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1"]
 }
 ```
 
@@ -309,7 +309,7 @@ Response:
 ```jsonc
 {
   "version": 1,
-  "features": ["streaming", "uploads.v2", "projects.v1", "dashboard.snapshot"],
+  "features": ["streaming", "uploads.v2", "projects.v1", "plans.v1", "dashboard.snapshot"],
   "limits": { "max_encrypted_frame_bytes": 262144 }
 }
 ```
@@ -399,6 +399,42 @@ Response:
 }
 ```
 
+#### `plan.list`
+
+Target: device
+
+Request:
+
+```jsonc
+{
+  "project_id": "<project id>?",
+  "worktree_id": "<worktree id>?"
+}
+```
+
+Response:
+
+```jsonc
+{
+  "plans": [
+    {
+      "id": "<plan id>",
+      "project_id": "<project id>",
+      "worktree_id": "<worktree id>?",
+      "channel_id": "<channel id>?",
+      "title": "<string>",
+      "status": "draft" | "queued" | "in-progress" | "review" | "done",
+      "body": "<markdown>",
+      "step_count": 4,
+      "done_step_count": 1,
+      "model": "<string>?",
+      "created_at": 1715788800.0,
+      "updated_at": 1715788800.0
+    }
+  ]
+}
+```
+
 ### 5.2 Dashboard
 
 #### `dashboard.snapshot`
@@ -453,12 +489,12 @@ Response:
       ],
       "plans": [
         {
-          "id": "plan-<worktree prefix>",
+          "id": "<plan id>",
           "project_id": "<project id>",
-          "worktree_id": "<worktree id>",
+          "worktree_id": "<worktree id>?",
           "channel_id": "<channel id>?",
-          "title": "<channel name>",
-          "status": "in-progress" | "draft",
+          "title": "<plan title>",
+          "status": "draft" | "queued" | "in-progress" | "review" | "done",
           "steps": 1,
           "doneSteps": 0,
           "model": "<model>",
@@ -471,9 +507,9 @@ Response:
 }
 ```
 
-This snapshot reads project/worktree primitives, then joins current channel and
-agent metadata for live status. Existing channel-only data is lazily migrated
-into one project/worktree graph per workspace.
+This snapshot reads project/worktree/plan primitives, then joins current
+channel and agent metadata for live status. Existing channel-only data is
+lazily migrated into one project/worktree/plan graph per workspace.
 
 ### 5.3 Channels
 
@@ -1381,7 +1417,7 @@ The `protocol.hello` payload is defined in §5.0.
 
 | v0 action | v1 method/event |
 |-----------|-----------------|
-| persisted project/worktree graph + agent metadata | `project.list`, `worktree.list`, `dashboard.snapshot` |
+| persisted project/worktree/plan graph + agent metadata | `project.list`, `worktree.list`, `plan.list`, `dashboard.snapshot` |
 | `list_channels` | `channel.list` |
 | `create_channel` | `channel.create` |
 | `rename_channel` | `channel.update` |
