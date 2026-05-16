@@ -308,6 +308,7 @@ class V1Protocol:
                         "uploads.v2",
                         "projects.v1",
                         "project.create",
+                        "project.repo.list",
                         "plans.v1",
                         "worktree.create",
                         "worktree.snapshot",
@@ -716,6 +717,27 @@ class V1Protocol:
             payload={"project": _project_primitive_payload(project, self.facade.store.list_worktrees(project.id))},
         )
 
+    async def _handle_project_repo_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
+        _ensure_project_graph(self.facade)
+        payload = _payload(app)
+        project_id = _require_str(payload.get("project_id"), "payload.project_id")
+        project = self.facade.store.get_project(project_id)
+        if not project:
+            raise V1Error("not_found", "project not found", details={"project_id": project_id})
+
+        repos, error = await _project_repo_list(project)
+        await self._send_response(
+            session,
+            ws,
+            app,
+            payload={
+                "project_id": project.id,
+                "root_path": project.root_path,
+                "repos": repos,
+                "error": error,
+            },
+        )
+
     async def _handle_worktree_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
         _ensure_project_graph(self.facade)
         payload = _payload(app)
@@ -740,18 +762,30 @@ class V1Protocol:
         worktree_id = _clean_text(payload.get("worktree_id")) or _new_id("wt")
         channel_id = _clean_text(payload.get("channel_id")) or str(uuid.uuid4())
         branch = _clean_text(payload.get("branch")) or f"agents/{_slug(name)}-{uuid.uuid4().hex[:6]}"
-        base_ref = _clean_text(payload.get("base_ref")) or project.default_branch or "HEAD"
+        repo_root = _resolve_project_repo(project, payload.get("repo_path") or payload.get("repository_path"))
+        _, repo_branch = _git_workspace(str(repo_root)) if repo_root else (None, "")
+        base_ref = _clean_text(payload.get("base_ref")) or repo_branch or project.default_branch or "HEAD"
         path = _clean_text(payload.get("path"))
         git_created = False
         git_error = None
 
         if payload.get("create_git_worktree") is True:
-            created_path, git_error = await _create_git_worktree(project, path, branch, base_ref)
-            git_created = git_error is None
-            if git_created or path:
-                path = created_path
+            created_path, git_error = await _create_git_worktree(project, repo_root, path, branch, base_ref)
+            if git_error:
+                raise V1Error(
+                    "failed_precondition",
+                    "git worktree creation failed",
+                    details={
+                        "repo_path": str(repo_root) if repo_root else project.root_path,
+                        "branch": branch,
+                        "base_ref": base_ref,
+                        "error": git_error,
+                    },
+                )
+            git_created = True
+            path = created_path
         if not path:
-            path = project.root_path
+            path = str(repo_root) if repo_root else project.root_path
 
         channel = self.facade.store.create_channel(channel_id, name)
         worktree = self.facade.store.upsert_worktree(
@@ -1151,6 +1185,22 @@ _DASHBOARD_COLORS = (
     "#e11d48",
     "#d97706",
 )
+_PROJECT_REPO_SCAN_DEPTH = 3
+_PROJECT_REPO_SCAN_LIMIT = 64
+_PROJECT_REPO_SCAN_SKIP = frozenset({
+    ".cache",
+    ".codex",
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "__pycache__",
+    "coverage",
+    "dist",
+    "node_modules",
+    "target",
+    "vendor",
+})
 
 
 def _dashboard_snapshot(facade: "E2EEHandler") -> dict[str, Any]:
@@ -1372,6 +1422,110 @@ def _plan_primitive_payload(plan: Any) -> dict[str, Any]:
     }
 
 
+async def _project_repo_list(project: Any) -> tuple[list[dict[str, Any]], str | None]:
+    root_text = _clean_text(getattr(project, "root_path", ""))
+    if not root_text:
+        return [], "project has no root_path"
+    try:
+        root = Path(os.path.expanduser(os.path.expandvars(root_text))).resolve()
+    except OSError as exc:
+        return [], str(exc)
+    if not root.is_dir():
+        return [], "project root_path is not an existing directory"
+
+    repo_paths = _find_project_repos(root)
+    repo_payloads = await asyncio.gather(*(_repo_payload(root, repo) for repo in repo_paths))
+    return list(repo_payloads), None
+
+
+def _find_project_repos(root: Path) -> list[Path]:
+    repos: list[Path] = []
+
+    def visit(path: Path, depth: int) -> None:
+        if len(repos) >= _PROJECT_REPO_SCAN_LIMIT:
+            return
+        if _is_git_repo_path(path):
+            repos.append(path)
+            return
+        if depth >= _PROJECT_REPO_SCAN_DEPTH:
+            return
+        try:
+            children = sorted(path.iterdir(), key=lambda child: child.name.lower())
+        except OSError:
+            return
+        for child in children:
+            if len(repos) >= _PROJECT_REPO_SCAN_LIMIT:
+                return
+            if not child.is_dir():
+                continue
+            if child.name in _PROJECT_REPO_SCAN_SKIP:
+                continue
+            if child.name.startswith(".") and child.name != ".worktrees":
+                continue
+            visit(child, depth + 1)
+
+    visit(root, 0)
+    return repos
+
+
+def _is_git_repo_path(path: Path) -> bool:
+    return (path / ".git").exists()
+
+
+async def _repo_payload(project_root: Path, repo: Path) -> dict[str, Any]:
+    branch, _, upstream = await files.git_branch_info(str(repo))
+    remote = await files.git_remote_name(str(repo))
+    try:
+        relative = str(repo.relative_to(project_root))
+    except ValueError:
+        relative = str(repo)
+    if relative == ".":
+        relative = "."
+    name = remote or (repo.name or relative or "repository")
+    return {
+        "id": f"repo-{hashlib.sha256(str(repo).encode()).hexdigest()[:12]}",
+        "name": name,
+        "path": str(repo),
+        "relative_path": relative,
+        "branch": branch or "main",
+        "upstream": upstream,
+        "remote": remote,
+        "is_root": repo == project_root,
+    }
+
+
+def _resolve_project_repo(project: Any, value: Any) -> Path | None:
+    repo_path = _clean_text(value)
+    if not repo_path:
+        return None
+    root_text = _clean_text(getattr(project, "root_path", ""))
+    if not root_text:
+        raise V1Error("invalid_request", "project has no root_path", details={"field": "payload.repo_path"})
+
+    try:
+        project_root = Path(os.path.expanduser(os.path.expandvars(root_text))).resolve()
+        candidate = Path(os.path.expanduser(os.path.expandvars(repo_path)))
+        if not candidate.is_absolute():
+            candidate = project_root / candidate
+        candidate = candidate.resolve()
+        candidate.relative_to(project_root)
+    except (OSError, ValueError):
+        raise V1Error(
+            "invalid_request",
+            "payload.repo_path must be inside the project root",
+            details={"field": "payload.repo_path", "repo_path": repo_path},
+        ) from None
+
+    repo_root, _ = _git_workspace(str(candidate))
+    if not repo_root or repo_root.resolve() != candidate:
+        raise V1Error(
+            "invalid_request",
+            "payload.repo_path must point to a git repository root",
+            details={"field": "payload.repo_path", "repo_path": str(candidate)},
+        )
+    return repo_root
+
+
 def _clean_text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
@@ -1438,11 +1592,13 @@ async def _attach_worktree_agent(
 
 async def _create_git_worktree(
     project: Any,
+    repo_root: Path | None,
     path: str,
     branch: str,
     base_ref: str,
 ) -> tuple[str, str | None]:
-    repo_root, _ = _git_workspace(project.root_path)
+    if repo_root is None:
+        repo_root, _ = _git_workspace(project.root_path)
     if not repo_root:
         return path, "repository not found"
 

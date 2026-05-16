@@ -300,7 +300,7 @@ Request:
 {
   "client": { "name": "build-web", "version": "<string>" },
   "accept_versions": [1],
-  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "plans.v1", "worktree.create", "worktree.snapshot"]
+  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot"]
 }
 ```
 
@@ -309,7 +309,7 @@ Response:
 ```jsonc
 {
   "version": 1,
-  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "plans.v1", "worktree.create", "worktree.snapshot", "dashboard.snapshot"],
+  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot", "dashboard.snapshot"],
   "limits": { "max_encrypted_frame_bytes": 262144 }
 }
 ```
@@ -398,6 +398,38 @@ Response:
 }
 ```
 
+#### `project.repo.list`
+
+Target: device
+
+Request:
+
+```jsonc
+{ "project_id": "<project id>" }
+```
+
+Response:
+
+```jsonc
+{
+  "project_id": "<project id>",
+  "root_path": "<absolute project directory>",
+  "repos": [
+    {
+      "id": "<repo id>",
+      "name": "owner/repo or directory name",
+      "path": "<absolute git repository root>",
+      "relative_path": "." | "services/api",
+      "branch": "main",
+      "upstream": "origin/main?",
+      "remote": "owner/repo?",
+      "is_root": false
+    }
+  ],
+  "error": null
+}
+```
+
 #### `worktree.list`
 
 Target: device
@@ -440,6 +472,7 @@ Request:
 {
   "project_id": "<project id>",
   "name": "<display name>?",
+  "repo_path": "<absolute or project-relative git repository root>?",
   "branch": "agents/<branch>?",
   "path": "<absolute path>?",
   "base_ref": "main?",
@@ -475,6 +508,9 @@ Response:
   "git": { "created": false, "error": null }
 }
 ```
+
+If `create_git_worktree` is true and `git worktree add` fails, the device
+returns `failed_precondition` and does not create a channel or start an agent.
 
 #### `worktree.snapshot`
 
@@ -1542,7 +1578,7 @@ The `protocol.hello` payload is defined in §5.0.
 
 | v0 action | v1 method/event |
 |-----------|-----------------|
-| persisted project/worktree/plan graph + agent metadata | `project.list`, `project.create`, `worktree.list`, `worktree.create`, `worktree.snapshot`, `plan.list`, `dashboard.snapshot` |
+| persisted project/worktree/plan graph + agent metadata | `project.list`, `project.create`, `project.repo.list`, `worktree.list`, `worktree.create`, `worktree.snapshot`, `plan.list`, `dashboard.snapshot` |
 | `list_channels` | `channel.list` |
 | `create_channel` | `channel.create` |
 | `rename_channel` | `channel.update` |

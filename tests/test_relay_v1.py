@@ -246,6 +246,111 @@ async def test_v1_project_create_sets_name_and_directory(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_v1_project_repo_list_discovers_repos_under_project_root(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    api = root / "services" / "api"
+    web = root / "build" / "web"
+    api.mkdir(parents=True)
+    web.mkdir(parents=True)
+    _git(api, "init")
+    _git(web, "init")
+
+    handler = _handler(tmp_path)
+    handler.store.upsert_project("proj-1", "Workspace", root_path=str(root), repo="workspace", default_branch="main")
+    sent = _capture(handler)
+
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {
+            "frame_type": "data",
+            "payload": _v1_request(
+                "req-project-repos",
+                "project.repo.list",
+                payload={"project_id": "proj-1"},
+            ),
+        },
+        object(),
+    )
+
+    payload = sent[0]["payload"]
+    repo_paths = {repo["relative_path"] for repo in payload["repos"]}
+    assert sent[0]["type"] == "project.repo.list"
+    assert payload["project_id"] == "proj-1"
+    assert repo_paths == {"services/api", "build/web"}
+    assert all(repo["path"].startswith(str(root)) for repo in payload["repos"])
+
+
+@pytest.mark.asyncio
+async def test_v1_worktree_create_can_target_nested_project_repo(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    repo = root / "services" / "api"
+    repo.mkdir(parents=True)
+    _git(repo, "init")
+
+    handler = _handler(tmp_path)
+    handler.store.upsert_project("proj-1", "Workspace", root_path=str(root), repo="workspace", default_branch="main")
+    sent = _capture(handler)
+
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {
+            "frame_type": "data",
+            "payload": _v1_request(
+                "req-worktree-create",
+                "worktree.create",
+                payload={
+                    "project_id": "proj-1",
+                    "name": "API agent",
+                    "repo_path": "services/api",
+                },
+            ),
+        },
+        object(),
+    )
+
+    payload = sent[0]["payload"]
+    assert sent[0]["type"] == "worktree.create"
+    assert payload["worktree"]["path"] == str(repo)
+    assert payload["git"]["created"] is False
+    assert payload["git"]["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_v1_worktree_create_reports_git_worktree_failure(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    repo = root / "services" / "api"
+    repo.mkdir(parents=True)
+    _git(repo, "init")
+
+    handler = _handler(tmp_path)
+    handler.store.upsert_project("proj-1", "Workspace", root_path=str(root), repo="workspace", default_branch="main")
+    sent = _capture(handler)
+
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {
+            "frame_type": "data",
+            "payload": _v1_request(
+                "req-worktree-create",
+                "worktree.create",
+                payload={
+                    "project_id": "proj-1",
+                    "name": "API agent",
+                    "repo_path": "services/api",
+                    "create_git_worktree": True,
+                },
+            ),
+        },
+        object(),
+    )
+
+    assert sent[0]["type"] == "worktree.create"
+    assert sent[0]["error"]["code"] == "failed_precondition"
+    assert sent[0]["payload"] == {}
+    assert handler.store.list_channels() == []
+
+
+@pytest.mark.asyncio
 async def test_v1_worktree_create_attaches_channel_and_plan(tmp_path: Path) -> None:
     handler = _handler(tmp_path)
     handler.store.upsert_project(
