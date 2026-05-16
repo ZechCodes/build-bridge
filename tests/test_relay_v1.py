@@ -426,6 +426,46 @@ async def test_v1_worktree_snapshot_returns_live_git_state(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_v1_worktree_snapshot_includes_agent_settings(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+
+    handler = _handler(tmp_path)
+    handler.store.create_channel("ch-1", "Agent workspace")
+    handler.store.upsert_project("proj-1", "repo", root_path=str(repo), repo="repo", default_branch="main")
+    handler.store.upsert_worktree("wt-1", "proj-1", "Agent workspace", path=str(repo), branch="main", status="idle", channel_id="ch-1")
+    agent_channel = SimpleNamespace(
+        working_directory=str(repo),
+        harness="codex",
+        model="gpt-5.2",
+        effort="high",
+        auto_approve_tools=True,
+        status="active",
+    )
+    handler._agent_server = SimpleNamespace(store=SimpleNamespace(get_channel=lambda channel_id: agent_channel))
+    handler._agent_spawner = SimpleNamespace(is_running=lambda channel_id: channel_id == "ch-1")
+    sent = _capture(handler)
+
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {"frame_type": "data", "payload": _v1_request("req-wt-snap", "worktree.snapshot", payload={"worktree_id": "wt-1"})},
+        object(),
+    )
+
+    assert sent[0]["type"] == "worktree.snapshot"
+    assert sent[0]["payload"]["agent"] == {
+        "harness": "codex",
+        "model": "gpt-5.2",
+        "effort": "high",
+        "auto_approve_tools": True,
+        "working_directory": str(repo),
+        "status": "active",
+        "is_running": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_v1_unknown_method_returns_normalized_error(tmp_path: Path) -> None:
     handler = _handler(tmp_path)
     sent = _capture(handler)

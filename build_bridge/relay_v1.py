@@ -1254,6 +1254,7 @@ def _dashboard_snapshot(facade: "E2EEHandler") -> dict[str, Any]:
                 and getattr(agent_channel, "status", "") == "active"
             )
             status = _dashboard_worktree_status(agent_channel, is_running) if agent_channel else worktree.status
+            agent_config = _agent_settings_payload(agent_channel, agent_spawner, worktree.channel_id)
             updated_at = (
                 _timestamp(getattr(agent_channel, "updated_at", None))
                 or worktree.updated_at
@@ -1261,7 +1262,7 @@ def _dashboard_snapshot(facade: "E2EEHandler") -> dict[str, Any]:
                 or project_record.updated_at
             )
             last_active = _relative_time(updated_at)
-            model = str(getattr(agent_channel, "model", "") or getattr(agent_channel, "harness", "") or "device")
+            model = str(agent_config.get("model") or agent_config.get("harness") or "device")
             display_agent = _display_agent(agent_channel)
             current_plan = plans_by_worktree.get(worktree.id, [None])[0]
             plan_id = current_plan.id if current_plan else ""
@@ -1282,6 +1283,12 @@ def _dashboard_snapshot(facade: "E2EEHandler") -> dict[str, Any]:
                 "plan": plan_id,
                 "model": model,
                 "agent": display_agent,
+                "agent_config": agent_config,
+                "harness": agent_config.get("harness", ""),
+                "effort": agent_config.get("effort", ""),
+                "auto_approve_tools": agent_config.get("auto_approve_tools", False),
+                "agent_running": agent_config.get("is_running", False),
+                "agent_status": agent_config.get("status", ""),
                 "status": status,
                 "summary": worktree.name,
                 "device": device_id or "local",
@@ -1419,6 +1426,29 @@ def _plan_primitive_payload(plan: Any) -> dict[str, Any]:
         "model": plan.model,
         "created_at": plan.created_at,
         "updated_at": plan.updated_at,
+    }
+
+
+def _agent_settings_payload(agent_channel: Any, agent_spawner: Any, channel_id: str | None) -> dict[str, Any]:
+    is_running = bool(channel_id and agent_spawner and agent_spawner.is_running(channel_id))
+    if not agent_channel:
+        return {
+            "harness": "",
+            "model": "",
+            "effort": "",
+            "auto_approve_tools": False,
+            "working_directory": "",
+            "status": "missing",
+            "is_running": is_running,
+        }
+    return {
+        "harness": str(getattr(agent_channel, "harness", "") or ""),
+        "model": str(getattr(agent_channel, "model", "") or ""),
+        "effort": str(getattr(agent_channel, "effort", "") or ""),
+        "auto_approve_tools": bool(getattr(agent_channel, "auto_approve_tools", False)),
+        "working_directory": str(getattr(agent_channel, "working_directory", "") or ""),
+        "status": str(getattr(agent_channel, "status", "") or ""),
+        "is_running": is_running,
     }
 
 
@@ -1628,6 +1658,7 @@ def _default_worktree_path(repo_root: Path, branch: str) -> Path:
 async def _worktree_snapshot(facade: "E2EEHandler", worktree: Any) -> dict[str, Any]:
     project = facade.store.get_project(worktree.project_id)
     agent_server = getattr(facade, "_agent_server", None)
+    agent_spawner = getattr(facade, "_agent_spawner", None)
     agent_channel = (
         agent_server.store.get_channel(worktree.channel_id)
         if agent_server and worktree.channel_id
@@ -1670,6 +1701,7 @@ async def _worktree_snapshot(facade: "E2EEHandler", worktree: Any) -> dict[str, 
         "schema": "worktree.snapshot.v1",
         "worktree": _worktree_primitive_payload(worktree),
         "project": _project_primitive_payload(project, facade.store.list_worktrees(project.id)) if project else None,
+        "agent": _agent_settings_payload(agent_channel, agent_spawner, worktree.channel_id),
         "workspace": cwd,
         "git": git_payload,
         "files": file_entries,

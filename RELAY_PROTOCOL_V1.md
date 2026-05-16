@@ -529,6 +529,15 @@ Response:
   "schema": "worktree.snapshot.v1",
   "worktree": { "id": "<worktree id>", "project_id": "<project id>" },
   "project": { "id": "<project id>", "name": "<string>" },
+  "agent": {
+    "harness": "codex",
+    "model": "gpt-5.2",
+    "effort": "high",
+    "auto_approve_tools": false,
+    "working_directory": "<absolute path>",
+    "status": "active",
+    "is_running": true
+  },
   "workspace": "<absolute path>?",
   "git": {
     "repo_path": ".",
