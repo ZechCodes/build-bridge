@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,8 @@ from typing import Any
 
 import pytest
 
+from build_bridge import relay_protocol as proto
+from build_bridge import relay_v1
 from build_bridge.e2ee import E2EEHandler
 from build_bridge.relay_session import ActiveSession
 from build_bridge.storage import MessageStore
@@ -78,6 +81,7 @@ async def test_v1_protocol_hello_routes_before_v0_dispatch(tmp_path: Path) -> No
     assert sent[0]["ref"] == "req-1"
     assert sent[0]["type"] == "protocol.hello"
     assert sent[0]["payload"]["version"] == 1
+    assert "review.denied" in sent[0]["payload"]["features"]
     assert sent[0]["meta"]["trace_id"] == "trace-1"
 
 
@@ -463,6 +467,80 @@ async def test_v1_worktree_snapshot_includes_agent_settings(tmp_path: Path) -> N
         "status": "active",
         "is_running": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_v1_review_denied_forwards_structured_feedback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    handler = _handler(tmp_path)
+    handler.store.create_channel("ch-1", "Agent workspace")
+    sent = _capture(handler)
+    captured: dict[str, Any] = {}
+
+    async def fake_chat_message(ctx, session, frame, ws):
+        captured["frame"] = frame
+        await ctx.send_frame(
+            session,
+            ws,
+            {
+                "action": proto.DELIVERED,
+                "message_id": frame["message_id"],
+                "channel_id": frame["payload"]["channel_id"],
+            },
+        )
+
+    monkeypatch.setattr(relay_v1.messages, "handle_chat_message", fake_chat_message)
+
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {
+            "frame_type": "data",
+            "payload": _v1_request(
+                "req-review-denied",
+                "review.denied",
+                channel_id="ch-1",
+                payload={
+                    "file": "src/app.py",
+                    "repo_path": "services/api",
+                    "reason": "Keep the change narrower and preserve the existing error path.",
+                    "diff": "@@\n-old\n+new\n",
+                },
+            ),
+        },
+        object(),
+    )
+
+    assert sent[0]["type"] == "review.denied"
+    assert sent[0]["payload"]["message"] == {"id": "req-review-denied", "channel_id": "ch-1"}
+    frame = captured["frame"]
+    assert frame["payload"]["channel_id"] == "ch-1"
+    content = frame["payload"]["content"]
+    marker = content.split(relay_v1.REVIEW_DENIAL_BEGIN, 1)[1].split(relay_v1.REVIEW_DENIAL_END, 1)[0]
+    parsed = json.loads(marker)
+    assert parsed["kind"] == "review_denied"
+    assert parsed["file"] == "src/app.py"
+    assert parsed["repo_path"] == "services/api"
+    assert parsed["reason"] == "Keep the change narrower and preserve the existing error path."
+    assert parsed["diff"] == "@@\n-old\n+new"
+    assert "Please revise the work to address the feedback." in content
+
+
+@pytest.mark.asyncio
+async def test_v1_review_denied_requires_file_and_reason(tmp_path: Path) -> None:
+    handler = _handler(tmp_path)
+    sent = _capture(handler)
+
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {
+            "frame_type": "data",
+            "payload": _v1_request("req-review-denied", "review.denied", channel_id="ch-1", payload={}),
+        },
+        object(),
+    )
+
+    assert sent[0]["type"] == "review.denied"
+    assert sent[0]["error"]["code"] == "invalid_request"
+    assert sent[0]["error"]["details"]["field"] == "payload.file"
 
 
 @pytest.mark.asyncio

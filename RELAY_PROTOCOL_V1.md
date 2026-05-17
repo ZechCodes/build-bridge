@@ -300,7 +300,7 @@ Request:
 {
   "client": { "name": "build-web", "version": "<string>" },
   "accept_versions": [1],
-  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot"]
+  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot", "review.denied"]
 }
 ```
 
@@ -309,7 +309,7 @@ Response:
 ```jsonc
 {
   "version": 1,
-  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot", "dashboard.snapshot"],
+  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot", "review.denied", "dashboard.snapshot"],
   "limits": { "max_encrypted_frame_bytes": 262144 }
 }
 ```
@@ -566,6 +566,35 @@ Response:
     }
   ],
   "tests": []
+}
+```
+
+#### `review.denied`
+
+Target: channel
+
+Sends structured review feedback to the agent attached to the target channel.
+The device persists it as a normal client message and forwards it through the
+agent chat path. The content includes a compact structured marker so clients can
+render the message as a review-denial card after reload.
+
+Request:
+
+```jsonc
+{
+  "file": "src/app.ts",
+  "reason": "Keep this narrower and preserve the existing error path.",
+  "diff": "<unified diff>",
+  "repo_path": "."
+}
+```
+
+Response:
+
+```jsonc
+{
+  "message": { "id": "<message id>", "channel_id": "<channel id>" },
+  "agent_delivery": "accepted"
 }
 ```
 
@@ -1587,7 +1616,7 @@ The `protocol.hello` payload is defined in §5.0.
 
 | v0 action | v1 method/event |
 |-----------|-----------------|
-| persisted project/worktree/plan graph + agent metadata | `project.list`, `project.create`, `project.repo.list`, `worktree.list`, `worktree.create`, `worktree.snapshot`, `plan.list`, `dashboard.snapshot` |
+| persisted project/worktree/plan graph + agent metadata | `project.list`, `project.create`, `project.repo.list`, `worktree.list`, `worktree.create`, `worktree.snapshot`, `review.denied`, `plan.list`, `dashboard.snapshot` |
 | `list_channels` | `channel.list` |
 | `create_channel` | `channel.create` |
 | `rename_channel` | `channel.update` |

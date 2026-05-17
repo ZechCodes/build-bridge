@@ -54,6 +54,10 @@ log = logging.getLogger(__name__)
 
 V1_VERSION = 1
 V1_KINDS_IN = frozenset({"request", "close"})
+REVIEW_DENIAL_BEGIN = "<build-review-denied>"
+REVIEW_DENIAL_END = "</build-review-denied>"
+REVIEW_DENIAL_REASON_LIMIT = 4000
+REVIEW_DENIAL_DIFF_LIMIT = 20000
 
 
 class V1Error(Exception):
@@ -312,6 +316,7 @@ class V1Protocol:
                         "plans.v1",
                         "worktree.create",
                         "worktree.snapshot",
+                        "review.denied",
                         "dashboard.snapshot",
                     ],
                     "limits": {"max_encrypted_frame_bytes": 262144},
@@ -841,6 +846,35 @@ class V1Protocol:
             ws,
             app,
             payload=await _worktree_snapshot(self.facade, worktree),
+        )
+
+    async def _handle_review_denied(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
+        channel_id = _channel_id(app)
+        payload = _payload(app)
+        file_path = _clean_text(payload.get("file") or payload.get("path"))
+        reason = _clean_text(payload.get("reason"))
+        diff = payload.get("diff") if isinstance(payload.get("diff"), str) else ""
+        repo_path = _clean_text(payload.get("repo_path"))
+        if not file_path:
+            raise V1Error("invalid_request", "payload.file is required", details={"field": "payload.file"})
+        if not reason:
+            raise V1Error("invalid_request", "payload.reason is required", details={"field": "payload.reason"})
+
+        ctx = V1RequestContext(self, app)
+        await self._call_v0(
+            ctx,
+            session,
+            ws,
+            v0.MESSAGE,
+            {
+                "action": v0.MESSAGE,
+                "channel_id": channel_id,
+                "content": _review_denial_content(file_path, reason, diff, repo_path),
+                "attachments": [],
+                "model": None,
+                "effort": None,
+                "plan_mode": None,
+            },
         )
 
     async def _handle_plan_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
@@ -1653,6 +1687,46 @@ def _default_worktree_path(repo_root: Path, branch: str) -> Path:
         return candidate
     suffix = uuid.uuid4().hex[:6]
     return base / f"{leaf}-{suffix}"
+
+
+def _review_denial_content(file_path: str, reason: str, diff: str, repo_path: str = "") -> str:
+    reason_text = _bounded_text(reason, REVIEW_DENIAL_REASON_LIMIT)
+    diff_text = _bounded_text(diff, REVIEW_DENIAL_DIFF_LIMIT)
+    data = {
+        "kind": "review_denied",
+        "file": file_path,
+        "reason": reason_text,
+        "diff": diff_text,
+    }
+    if repo_path:
+        data["repo_path"] = repo_path
+
+    marker = (
+        f"{REVIEW_DENIAL_BEGIN}"
+        f"{json.dumps(data, ensure_ascii=True, separators=(',', ':'))}"
+        f"{REVIEW_DENIAL_END}"
+    )
+    parts = [
+        marker,
+        "",
+        f"Review denied for `{file_path}`.",
+        "",
+        "User feedback:",
+        reason_text,
+    ]
+    if repo_path:
+        parts.extend(["", f"Repository: `{repo_path}`."])
+    if diff_text:
+        parts.extend(["", "Denied diff:", "```diff", diff_text, "```"])
+    parts.extend(["", "Please revise the work to address the feedback. Do not treat this as approval."])
+    return "\n".join(parts)
+
+
+def _bounded_text(value: str, limit: int) -> str:
+    text = value.strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n...[truncated]"
 
 
 async def _worktree_snapshot(facade: "E2EEHandler", worktree: Any) -> dict[str, Any]:
