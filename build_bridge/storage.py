@@ -228,6 +228,19 @@ class MessageStore:
         ).fetchall()
         return [self._row_to_project(row) for row in rows]
 
+    def clear_projects(self) -> dict[str, int]:
+        """Delete project primitives without deleting channels or messages."""
+        counts = {
+            "plans": int(self.db.execute("SELECT COUNT(*) FROM plans").fetchone()[0]),
+            "worktrees": int(self.db.execute("SELECT COUNT(*) FROM worktrees").fetchone()[0]),
+            "projects": int(self.db.execute("SELECT COUNT(*) FROM projects").fetchone()[0]),
+        }
+        self.db.execute("DELETE FROM plans")
+        self.db.execute("DELETE FROM worktrees")
+        self.db.execute("DELETE FROM projects")
+        self.db.commit()
+        return counts
+
     def upsert_worktree(
         self,
         worktree_id: str,

@@ -300,7 +300,7 @@ Request:
 {
   "client": { "name": "build-web", "version": "<string>" },
   "accept_versions": [1],
-  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot", "review.denied", "inbox.list"]
+  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.clear", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot", "review.denied", "inbox.list"]
 }
 ```
 
@@ -309,7 +309,7 @@ Response:
 ```jsonc
 {
   "version": 1,
-  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot", "review.denied", "inbox.list", "dashboard.snapshot"],
+  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.clear", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot", "review.denied", "inbox.list", "dashboard.snapshot"],
   "limits": { "max_encrypted_frame_bytes": 262144 }
 }
 ```
@@ -396,6 +396,25 @@ Response:
     "worktree_count": 0
   }
 }
+```
+
+#### `project.clear`
+
+Target: device
+
+Deletes all project/worktree/plan primitives from the local device store. This
+does not delete channels, messages, repositories, or git worktrees.
+
+Request:
+
+```jsonc
+{ "confirm": true }
+```
+
+Response:
+
+```jsonc
+{ "cleared": { "projects": 1, "worktrees": 2, "plans": 2 } }
 ```
 
 #### `project.repo.list`
@@ -1666,7 +1685,7 @@ The `protocol.hello` payload is defined in §5.0.
 
 | v0 action | v1 method/event |
 |-----------|-----------------|
-| persisted project/worktree/plan graph + agent metadata | `project.list`, `project.create`, `project.repo.list`, `worktree.list`, `worktree.create`, `worktree.snapshot`, `review.denied`, `inbox.list`, `plan.list`, `dashboard.snapshot` |
+| persisted project/worktree/plan graph + agent metadata | `project.list`, `project.create`, `project.clear`, `project.repo.list`, `worktree.list`, `worktree.create`, `worktree.snapshot`, `review.denied`, `inbox.list`, `plan.list`, `dashboard.snapshot` |
 | `list_channels` | `channel.list` |
 | `create_channel` | `channel.create` |
 | `rename_channel` | `channel.update` |

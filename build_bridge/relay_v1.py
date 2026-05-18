@@ -312,6 +312,7 @@ class V1Protocol:
                         "uploads.v2",
                         "projects.v1",
                         "project.create",
+                        "project.clear",
                         "project.repo.list",
                         "plans.v1",
                         "worktree.create",
@@ -685,7 +686,6 @@ class V1Protocol:
         )
 
     async def _handle_project_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
-        _ensure_project_graph(self.facade)
         await self._send_response(
             session,
             ws,
@@ -735,8 +735,18 @@ class V1Protocol:
             payload={"project": _project_primitive_payload(project, self.facade.store.list_worktrees(project.id))},
         )
 
+    async def _handle_project_clear(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
+        payload = _payload(app)
+        if payload.get("confirm") is not True:
+            raise V1Error("invalid_request", "payload.confirm must be true", details={"field": "payload.confirm"})
+        await self._send_response(
+            session,
+            ws,
+            app,
+            payload={"cleared": self.facade.store.clear_projects()},
+        )
+
     async def _handle_project_repo_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
-        _ensure_project_graph(self.facade)
         payload = _payload(app)
         project_id = _require_str(payload.get("project_id"), "payload.project_id")
         project = self.facade.store.get_project(project_id)
@@ -757,7 +767,6 @@ class V1Protocol:
         )
 
     async def _handle_worktree_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
-        _ensure_project_graph(self.facade)
         payload = _payload(app)
         project_id = payload.get("project_id")
         worktrees = self.facade.store.list_worktrees(project_id if isinstance(project_id, str) else None)
@@ -769,7 +778,6 @@ class V1Protocol:
         )
 
     async def _handle_worktree_create(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
-        _ensure_project_graph(self.facade)
         payload = _payload(app)
         project_id = _require_str(payload.get("project_id"), "payload.project_id")
         project = self.facade.store.get_project(project_id)
@@ -848,7 +856,6 @@ class V1Protocol:
         )
 
     async def _handle_worktree_snapshot(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
-        _ensure_project_graph(self.facade)
         payload = _payload(app)
         worktree_id = _require_str(payload.get("worktree_id"), "payload.worktree_id")
         worktree = self.facade.store.get_worktree(worktree_id)
@@ -891,7 +898,6 @@ class V1Protocol:
         )
 
     async def _handle_plan_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
-        _ensure_project_graph(self.facade)
         payload = _payload(app)
         project_id = payload.get("project_id")
         worktree_id = payload.get("worktree_id")
@@ -1251,7 +1257,6 @@ _PROJECT_REPO_SCAN_SKIP = frozenset({
 
 
 def _dashboard_snapshot(facade: "E2EEHandler") -> dict[str, Any]:
-    _ensure_project_graph(facade)
     agent_server = getattr(facade, "_agent_server", None)
     agent_spawner = getattr(facade, "_agent_spawner", None)
     device_id = str(getattr(facade.config, "device_id", ""))
@@ -1387,7 +1392,6 @@ def _dashboard_snapshot(facade: "E2EEHandler") -> dict[str, Any]:
 
 
 async def _inbox_items(facade: "E2EEHandler") -> list[dict[str, Any]]:
-    _ensure_project_graph(facade)
     agent_server = getattr(facade, "_agent_server", None)
     items: list[dict[str, Any]] = []
     seen: set[str] = set()

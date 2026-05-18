@@ -83,6 +83,7 @@ async def test_v1_protocol_hello_routes_before_v0_dispatch(tmp_path: Path) -> No
     assert sent[0]["payload"]["version"] == 1
     assert "review.denied" in sent[0]["payload"]["features"]
     assert "inbox.list" in sent[0]["payload"]["features"]
+    assert "project.clear" in sent[0]["payload"]["features"]
     assert sent[0]["meta"]["trace_id"] == "trace-1"
 
 
@@ -123,7 +124,7 @@ async def test_v1_channel_list_wraps_v0_handler_output(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_v1_dashboard_snapshot_derives_projects_from_channels(tmp_path: Path) -> None:
+async def test_v1_dashboard_snapshot_does_not_create_projects_from_channels(tmp_path: Path) -> None:
     handler = _handler(tmp_path)
     handler.store.create_channel("ch-1", "Tenant middleware")
     sent = _capture(handler)
@@ -139,14 +140,10 @@ async def test_v1_dashboard_snapshot_derives_projects_from_channels(tmp_path: Pa
     assert response["type"] == "dashboard.snapshot"
     assert response["payload"]["schema"] == "dashboard.snapshot.v1"
     assert response["payload"]["source"] == "projects"
-    assert response["payload"]["projects"][0]["id"] == "channels"
-    assert response["payload"]["projects"][0]["worktrees"][0]["project_id"] == "channels"
-    assert response["payload"]["projects"][0]["plans"][0]["channel_id"] == "ch-1"
-    assert response["payload"]["projects"][0]["worktrees"][0]["id"] == "ch-1"
-    assert response["payload"]["projects"][0]["worktrees"][0]["summary"] == "Tenant middleware"
-    assert handler.store.get_project("channels") is not None
-    assert handler.store.get_worktree("ch-1") is not None
-    assert handler.store.get_plan("plan-ch-1") is not None
+    assert response["payload"]["projects"] == []
+    assert handler.store.get_project("channels") is None
+    assert handler.store.get_worktree("ch-1") is None
+    assert handler.store.get_plan("plan-ch-1") is None
 
 
 @pytest.mark.asyncio
@@ -317,6 +314,35 @@ async def test_v1_project_worktree_and_plan_list_use_primitives(tmp_path: Path) 
     assert sent[2]["type"] == "plan.list"
     assert sent[2]["payload"]["plans"][0]["id"] == "plan-1"
     assert sent[2]["payload"]["plans"][0]["worktree_id"] == "wt-1"
+
+
+@pytest.mark.asyncio
+async def test_v1_project_clear_removes_project_graph_only(tmp_path: Path) -> None:
+    handler = _handler(tmp_path)
+    handler.store.create_channel("ch-1", "Keep channel")
+    handler.store.upsert_project("proj-1", "Workspace")
+    handler.store.upsert_worktree("wt-1", "proj-1", "Agent", channel_id="ch-1")
+    handler.store.upsert_plan("plan-1", "proj-1", "Plan", worktree_id="wt-1", channel_id="ch-1")
+    sent = _capture(handler)
+
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {
+            "frame_type": "data",
+            "payload": _v1_request(
+                "req-project-clear",
+                "project.clear",
+                payload={"confirm": True},
+            ),
+        },
+        object(),
+    )
+
+    assert sent[0]["type"] == "project.clear"
+    assert sent[0]["payload"]["cleared"] == {"plans": 1, "worktrees": 1, "projects": 1}
+    assert handler.store.list_projects() == []
+    assert handler.store.list_worktrees() == []
+    assert handler.store.list_channels()[0].id == "ch-1"
 
 
 @pytest.mark.asyncio
