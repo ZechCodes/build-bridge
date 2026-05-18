@@ -1459,6 +1459,7 @@ async def _inbox_items(facade: "E2EEHandler") -> list[dict[str, Any]]:
                         timestamp=_unix_seconds(message.created_at),
                         context=context,
                         interaction_id=interaction_id,
+                        interaction=interaction,
                     ),
                 )
                 continue
@@ -1653,11 +1654,12 @@ def _inbox_item(
     context: dict[str, Any],
     plan_id: str | None = None,
     interaction_id: str | None = None,
+    interaction: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     plan = context.get("plan")
     plan_id = plan_id or (getattr(plan, "id", "") if plan else "")
     ts = float(timestamp or context.get("updated_at") or 0)
-    return {
+    out = {
         "id": item_id,
         "kind": kind,
         "priority": priority,
@@ -1675,6 +1677,9 @@ def _inbox_item(
         "actions": actions,
         "_ts": ts,
     }
+    if interaction:
+        out["interaction"] = _inbox_interaction_payload(interaction, interaction_id or "")
+    return out
 
 
 def _interaction_metadata(message: Any) -> dict[str, Any] | None:
@@ -1691,6 +1696,33 @@ def _interaction_inbox_kind(kind: str) -> str:
     if "review" in value:
         return "review"
     return "question"
+
+
+def _inbox_interaction_payload(interaction: dict[str, Any], interaction_id: str) -> dict[str, Any]:
+    return {
+        "id": interaction_id or str(interaction.get("interaction_id") or ""),
+        "kind": str(interaction.get("kind") or "question"),
+        "options": _interaction_options(interaction.get("options")),
+        "allowFreeform": bool(interaction.get("allow_freeform", True)),
+        "multiselect": bool(interaction.get("multiselect", False)),
+        "plan": str(interaction.get("plan") or ""),
+    }
+
+
+def _interaction_options(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    options: list[dict[str, str]] = []
+    for index, option in enumerate(value[:8]):
+        if isinstance(option, dict):
+            option_id = str(option.get("id") or option.get("value") or option.get("label") or index)
+            label = str(option.get("label") or option.get("title") or option_id)
+        else:
+            option_id = str(option)
+            label = option_id
+        if option_id:
+            options.append({"id": option_id, "label": label})
+    return options
 
 
 async def _current_complications(facade: "E2EEHandler") -> list[dict[str, Any]]:

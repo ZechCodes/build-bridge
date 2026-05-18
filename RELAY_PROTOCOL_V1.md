@@ -672,7 +672,15 @@ Response:
       "detail": "<context>",
       "actor": "<agent/model>",
       "time": "2m",
-      "actions": ["Open"]
+      "actions": ["Open"],
+      "interaction": {
+        "id": "<interaction id>",
+        "kind": "approval",
+        "options": [{ "id": "accept", "label": "Approve" }],
+        "allowFreeform": false,
+        "multiselect": false,
+        "plan": "<markdown plan text>?"
+      }
     }
   ]
 }

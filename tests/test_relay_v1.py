@@ -231,6 +231,17 @@ async def test_v1_inbox_list_reports_unresolved_interactions(tmp_path: Path) -> 
         "actor": "gpt-5.2",
         "time": "ignored",
         "actions": ["Respond"],
+        "interaction": {
+            "id": "int-1",
+            "kind": "permission",
+            "options": [
+                {"id": "Allow", "label": "Allow"},
+                {"id": "Deny", "label": "Deny"},
+            ],
+            "allowFreeform": True,
+            "multiselect": False,
+            "plan": "",
+        },
     }
 
 
