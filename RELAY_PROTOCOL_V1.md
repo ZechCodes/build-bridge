@@ -300,7 +300,7 @@ Request:
 {
   "client": { "name": "build-web", "version": "<string>" },
   "accept_versions": [1],
-  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot", "review.denied"]
+  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot", "review.denied", "inbox.list"]
 }
 ```
 
@@ -309,7 +309,7 @@ Response:
 ```jsonc
 {
   "version": 1,
-  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot", "review.denied", "dashboard.snapshot"],
+  "features": ["streaming", "uploads.v2", "projects.v1", "project.create", "project.repo.list", "plans.v1", "worktree.create", "worktree.snapshot", "review.denied", "inbox.list", "dashboard.snapshot"],
   "limits": { "max_encrypted_frame_bytes": 262144 }
 }
 ```
@@ -635,6 +635,48 @@ Response:
 ```
 
 ### 5.2 Dashboard
+
+#### `inbox.list`
+
+Target: device
+
+Returns actionable live inbox items derived from project/worktree/plan
+primitives, unresolved interaction requests, agent activity endings, review
+denial feedback, and git complications.
+
+Request:
+
+```jsonc
+{}
+```
+
+Response:
+
+```jsonc
+{
+  "schema": "inbox.v1",
+  "generated_at": 1715788800.0,
+  "items": [
+    {
+      "id": "interaction-<interaction id>",
+      "kind": "permission" | "review" | "question",
+      "priority": "high" | "medium" | "low",
+      "projectId": "<project id>",
+      "projectName": "<project name>",
+      "projectColor": "#6366f1",
+      "worktreeId": "<worktree id>",
+      "planId": "<plan id>?",
+      "channelId": "<channel id>?",
+      "interactionId": "<interaction id>?",
+      "title": "<short summary>",
+      "detail": "<context>",
+      "actor": "<agent/model>",
+      "time": "2m",
+      "actions": ["Open"]
+    }
+  ]
+}
+```
 
 #### `dashboard.snapshot`
 
@@ -1616,7 +1658,7 @@ The `protocol.hello` payload is defined in §5.0.
 
 | v0 action | v1 method/event |
 |-----------|-----------------|
-| persisted project/worktree/plan graph + agent metadata | `project.list`, `project.create`, `project.repo.list`, `worktree.list`, `worktree.create`, `worktree.snapshot`, `review.denied`, `plan.list`, `dashboard.snapshot` |
+| persisted project/worktree/plan graph + agent metadata | `project.list`, `project.create`, `project.repo.list`, `worktree.list`, `worktree.create`, `worktree.snapshot`, `review.denied`, `inbox.list`, `plan.list`, `dashboard.snapshot` |
 | `list_channels` | `channel.list` |
 | `create_channel` | `channel.create` |
 | `rename_channel` | `channel.update` |

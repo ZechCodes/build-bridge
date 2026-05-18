@@ -317,6 +317,7 @@ class V1Protocol:
                         "worktree.create",
                         "worktree.snapshot",
                         "review.denied",
+                        "inbox.list",
                         "dashboard.snapshot",
                     ],
                     "limits": {"max_encrypted_frame_bytes": 262144},
@@ -669,6 +670,18 @@ class V1Protocol:
             ws,
             app,
             payload=_dashboard_snapshot(self.facade),
+        )
+
+    async def _handle_inbox_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
+        await self._send_response(
+            session,
+            ws,
+            app,
+            payload={
+                "schema": "inbox.v1",
+                "generated_at": time.time(),
+                "items": await _inbox_items(self.facade),
+            },
         )
 
     async def _handle_project_list(self, session: "ActiveSession", app: dict[str, Any], ws: Any) -> None:
@@ -1373,11 +1386,394 @@ def _dashboard_snapshot(facade: "E2EEHandler") -> dict[str, Any]:
     }
 
 
+async def _inbox_items(facade: "E2EEHandler") -> list[dict[str, Any]]:
+    _ensure_project_graph(facade)
+    agent_server = getattr(facade, "_agent_server", None)
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    contexts = _inbox_contexts(facade)
+
+    for context in contexts:
+        channel_id = context.get("channel_id", "")
+        status = str(context.get("status") or "")
+        if status in {"blocked", "error"}:
+            _append_inbox_item(
+                items,
+                seen,
+                _inbox_item(
+                    item_id=f"agent-error-{context['worktree_id']}",
+                    kind="review",
+                    priority="high",
+                    title=f"Agent needs attention: {context['worktree_name']}",
+                    detail="The agent is in an error state. Open the worktree to inspect chat and activity.",
+                    actor=str(context.get("actor") or "device"),
+                    actions=["Open"],
+                    timestamp=float(context.get("updated_at") or 0),
+                    context=context,
+                ),
+            )
+
+        plan = context.get("plan")
+        if plan and getattr(plan, "status", "") == "review":
+            _append_inbox_item(
+                items,
+                seen,
+                _inbox_item(
+                    item_id=f"plan-review-{plan.id}",
+                    kind="review",
+                    priority="medium",
+                    title=f"Review plan: {plan.title}",
+                    detail=f"{context['project_name']} / {context['worktree_name']}",
+                    actor=str(context.get("actor") or "device"),
+                    actions=["Review"],
+                    timestamp=float(getattr(plan, "updated_at", 0) or context.get("updated_at") or 0),
+                    context=context,
+                    plan_id=plan.id,
+                ),
+            )
+
+        if not agent_server or not channel_id:
+            continue
+
+        try:
+            chat_history = agent_server.store.get_chat_history(channel_id)
+        except Exception as exc:
+            log.debug("Failed to inspect chat history for inbox %s: %s", channel_id[:8], exc)
+            chat_history = []
+        for message in chat_history[-25:]:
+            interaction = _interaction_metadata(message)
+            if interaction:
+                interaction_id = str(interaction.get("interaction_id") or message.id)
+                item_kind = _interaction_inbox_kind(str(interaction.get("kind") or "question"))
+                _append_inbox_item(
+                    items,
+                    seen,
+                    _inbox_item(
+                        item_id=f"interaction-{interaction_id}",
+                        kind=item_kind,
+                        priority="high" if item_kind == "permission" else "medium",
+                        title=_first_line(message.content) or "Agent needs input",
+                        detail=f"{context['project_name']} / {context['worktree_name']}",
+                        actor=str(context.get("actor") or "device"),
+                        actions=["Respond"],
+                        timestamp=_unix_seconds(message.created_at),
+                        context=context,
+                        interaction_id=interaction_id,
+                    ),
+                )
+                continue
+
+            review = _parse_review_denial_content(getattr(message, "content", ""))
+            if review and getattr(message, "role", "") == "user":
+                file_path = str(review.get("file") or "file")
+                reason = _first_line(str(review.get("reason") or "Review denied"))
+                _append_inbox_item(
+                    items,
+                    seen,
+                    _inbox_item(
+                        item_id=f"review-denied-{message.id}",
+                        kind="review",
+                        priority="low",
+                        title=f"Denied review feedback for {file_path}",
+                        detail=reason,
+                        actor="You",
+                        actions=["Open chat"],
+                        timestamp=_unix_seconds(message.created_at),
+                        context=context,
+                    ),
+                )
+
+        try:
+            e2ee_messages = facade.store.get_messages(channel_id, limit=25)
+        except Exception as exc:
+            log.debug("Failed to inspect E2EE messages for inbox %s: %s", channel_id[:8], exc)
+            e2ee_messages = []
+        for message in e2ee_messages:
+            review = _parse_review_denial_content(getattr(message, "content", ""))
+            if review and getattr(message, "sender", "") == "client":
+                file_path = str(review.get("file") or "file")
+                reason = _first_line(str(review.get("reason") or "Review denied"))
+                _append_inbox_item(
+                    items,
+                    seen,
+                    _inbox_item(
+                        item_id=f"review-denied-{message.id}",
+                        kind="review",
+                        priority="low",
+                        title=f"Denied review feedback for {file_path}",
+                        detail=reason,
+                        actor="You",
+                        actions=["Open chat"],
+                        timestamp=float(getattr(message, "created_at", 0) or 0),
+                        context=context,
+                    ),
+                )
+
+        try:
+            activity_entries = agent_server.store.get_activity_history(channel_id)
+        except Exception as exc:
+            log.debug("Failed to inspect activity for inbox %s: %s", channel_id[:8], exc)
+            activity_entries = []
+        end_entry = next((entry for entry in reversed(activity_entries) if entry.type == "end"), None)
+        if end_entry:
+            data = _json_dict(end_entry.data)
+            reason = str(data.get("reason") or "complete")
+            if reason == "error":
+                priority = "high"
+                title = f"Agent run failed: {context['worktree_name']}"
+                detail = "Open the worktree to inspect the latest activity."
+            elif reason in {"complete", "waiting"} and status != "working":
+                priority = "medium"
+                title = f"Agent run finished: {context['worktree_name']}"
+                detail = "Open the worktree to review changes or continue chat."
+            else:
+                continue
+            _append_inbox_item(
+                items,
+                seen,
+                _inbox_item(
+                    item_id=f"activity-end-{context['worktree_id']}-{reason}",
+                    kind="review",
+                    priority=priority,
+                    title=title,
+                    detail=detail,
+                    actor=str(context.get("actor") or "device"),
+                    actions=["Open"],
+                    timestamp=_unix_seconds(end_entry.created_at),
+                    context=context,
+                ),
+            )
+
+    for complication in await _current_complications(facade):
+        channel_id = str(complication.get("channel_id") or "")
+        context = next((item for item in contexts if item.get("channel_id") == channel_id), None)
+        if not context:
+            continue
+        data = complication.get("data") if isinstance(complication.get("data"), dict) else {}
+        if not _git_complication_needs_attention(data):
+            continue
+        repo = str(data.get("repo") or "repository")
+        conflicts = int(data.get("conflicts") or 0)
+        ahead = int(data.get("ahead") or 0)
+        behind = int(data.get("behind") or 0)
+        changed = _git_changed_count(data)
+        detail_bits = []
+        if conflicts:
+            detail_bits.append(f"{conflicts} conflicts")
+        if changed:
+            detail_bits.append(f"{changed} changed files")
+        if ahead:
+            detail_bits.append(f"{ahead} ahead")
+        if behind:
+            detail_bits.append(f"{behind} behind")
+        _append_inbox_item(
+            items,
+            seen,
+            _inbox_item(
+                item_id=f"complication-{complication.get('id') or repo}",
+                kind="review",
+                priority="high" if conflicts else "medium",
+                title=f"Git attention needed: {Path(repo).name or repo}",
+                detail=", ".join(detail_bits) or "Repository state changed",
+                actor=str(context.get("actor") or "device"),
+                actions=["Open"],
+                timestamp=_unix_seconds(complication.get("changed_at") or complication.get("timestamp")),
+                context=context,
+            ),
+        )
+
+    priority_rank = {"high": 0, "medium": 1, "low": 2}
+    items.sort(key=lambda item: (priority_rank.get(str(item.get("priority")), 9), -float(item.get("_ts", 0))))
+    for item in items:
+        item.pop("_ts", None)
+    return items[:50]
+
+
+def _inbox_contexts(facade: "E2EEHandler") -> list[dict[str, Any]]:
+    agent_server = getattr(facade, "_agent_server", None)
+    agent_spawner = getattr(facade, "_agent_spawner", None)
+    contexts: list[dict[str, Any]] = []
+    for project in facade.store.list_projects():
+        plans_by_worktree: dict[str, list[Any]] = {}
+        for plan in facade.store.list_plans(project.id):
+            if plan.worktree_id:
+                plans_by_worktree.setdefault(plan.worktree_id, []).append(plan)
+        for worktree in facade.store.list_worktrees(project.id):
+            agent_channel = (
+                agent_server.store.get_channel(worktree.channel_id)
+                if agent_server and worktree.channel_id
+                else None
+            )
+            is_running = bool(
+                agent_channel
+                and agent_spawner
+                and worktree.channel_id
+                and agent_spawner.is_running(worktree.channel_id)
+                and getattr(agent_channel, "status", "") == "active"
+            )
+            status = _dashboard_worktree_status(agent_channel, is_running) if agent_channel else worktree.status
+            updated_at = (
+                _timestamp(getattr(agent_channel, "updated_at", None))
+                or worktree.updated_at
+                or project.updated_at
+            )
+            contexts.append({
+                "project_id": project.id,
+                "project_name": project.name,
+                "project_color": project.color or _color_for(project.id),
+                "worktree_id": worktree.id,
+                "worktree_name": worktree.name,
+                "channel_id": worktree.channel_id or "",
+                "plan": plans_by_worktree.get(worktree.id, [None])[0],
+                "status": status,
+                "actor": _display_agent(agent_channel),
+                "updated_at": updated_at,
+            })
+    return contexts
+
+
+def _append_inbox_item(items: list[dict[str, Any]], seen: set[str], item: dict[str, Any]) -> None:
+    item_id = str(item.get("id") or "")
+    if not item_id or item_id in seen:
+        return
+    seen.add(item_id)
+    items.append(item)
+
+
+def _inbox_item(
+    *,
+    item_id: str,
+    kind: str,
+    priority: str,
+    title: str,
+    detail: str,
+    actor: str,
+    actions: list[str],
+    timestamp: float,
+    context: dict[str, Any],
+    plan_id: str | None = None,
+    interaction_id: str | None = None,
+) -> dict[str, Any]:
+    plan = context.get("plan")
+    plan_id = plan_id or (getattr(plan, "id", "") if plan else "")
+    ts = float(timestamp or context.get("updated_at") or 0)
+    return {
+        "id": item_id,
+        "kind": kind,
+        "priority": priority,
+        "projectId": context.get("project_id", ""),
+        "projectName": context.get("project_name", ""),
+        "projectColor": context.get("project_color", ""),
+        "worktreeId": context.get("worktree_id", ""),
+        "planId": plan_id,
+        "channelId": context.get("channel_id", ""),
+        "interactionId": interaction_id or "",
+        "title": title,
+        "detail": detail,
+        "actor": actor or "device",
+        "time": _relative_time(ts),
+        "actions": actions,
+        "_ts": ts,
+    }
+
+
+def _interaction_metadata(message: Any) -> dict[str, Any] | None:
+    meta = _json_dict(getattr(message, "metadata", None))
+    if not meta.get("interaction_id") or meta.get("resolved_at"):
+        return None
+    return meta
+
+
+def _interaction_inbox_kind(kind: str) -> str:
+    value = kind.lower()
+    if any(part in value for part in ("permission", "approval", "approve", "confirm")):
+        return "permission"
+    if "review" in value:
+        return "review"
+    return "question"
+
+
+async def _current_complications(facade: "E2EEHandler") -> list[dict[str, Any]]:
+    agent_server = getattr(facade, "_agent_server", None)
+    if not agent_server or not getattr(agent_server, "_complications", None):
+        return []
+    try:
+        return await agent_server._complications.get_current_complications(agent_store=agent_server.store)
+    except Exception as exc:
+        log.debug("Failed to inspect complications for inbox: %s", exc)
+        return []
+
+
+def _git_complication_needs_attention(data: dict[str, Any]) -> bool:
+    return bool(
+        int(data.get("conflicts") or 0)
+        or int(data.get("ahead") or 0)
+        or int(data.get("behind") or 0)
+        or _git_changed_count(data)
+        or int(data.get("stash_count") or 0)
+    )
+
+
+def _git_changed_count(data: dict[str, Any]) -> int:
+    staged = data.get("staged") if isinstance(data.get("staged"), dict) else {}
+    unstaged = data.get("unstaged") if isinstance(data.get("unstaged"), dict) else {}
+    return (
+        int(staged.get("total") or 0)
+        + int(unstaged.get("total") or 0)
+        + int(data.get("untracked") or 0)
+    )
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_review_denial_content(content: str) -> dict[str, Any] | None:
+    if not isinstance(content, str):
+        return None
+    start = content.find(REVIEW_DENIAL_BEGIN)
+    end = content.find(REVIEW_DENIAL_END)
+    if start < 0 or end <= start:
+        return None
+    parsed = _json_dict(content[start + len(REVIEW_DENIAL_BEGIN):end])
+    return parsed if parsed.get("kind") == "review_denied" else None
+
+
+def _first_line(value: str, limit: int = 140) -> str:
+    text = " ".join(str(value or "").strip().splitlines()).strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _unix_seconds(value: Any) -> float:
+    timestamp = _timestamp(value)
+    if timestamp > 10_000_000_000:
+        return timestamp / 1000
+    return timestamp
+
+
 def _ensure_project_graph(facade: "E2EEHandler") -> None:
     channels_in = facade.store.list_channels()
     agent_server = getattr(facade, "_agent_server", None)
+    attached_channel_ids = {
+        worktree.channel_id
+        for project in facade.store.list_projects()
+        for worktree in facade.store.list_worktrees(project.id)
+        if worktree.channel_id
+    }
 
     for channel in channels_in:
+        if channel.id in attached_channel_ids:
+            continue
         agent_channel = agent_server.store.get_channel(channel.id) if agent_server else None
         cwd = str(getattr(agent_channel, "working_directory", "") or "")
         workspace = _workspace_identity(channel.name, cwd)

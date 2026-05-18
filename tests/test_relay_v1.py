@@ -82,6 +82,7 @@ async def test_v1_protocol_hello_routes_before_v0_dispatch(tmp_path: Path) -> No
     assert sent[0]["type"] == "protocol.hello"
     assert sent[0]["payload"]["version"] == 1
     assert "review.denied" in sent[0]["payload"]["features"]
+    assert "inbox.list" in sent[0]["payload"]["features"]
     assert sent[0]["meta"]["trace_id"] == "trace-1"
 
 
@@ -146,6 +147,91 @@ async def test_v1_dashboard_snapshot_derives_projects_from_channels(tmp_path: Pa
     assert handler.store.get_project("channels") is not None
     assert handler.store.get_worktree("ch-1") is not None
     assert handler.store.get_plan("plan-ch-1") is not None
+
+
+@pytest.mark.asyncio
+async def test_v1_inbox_list_reports_unresolved_interactions(tmp_path: Path) -> None:
+    handler = _handler(tmp_path)
+    handler.store.create_channel("ch-1", "Agent workspace")
+    handler.store.upsert_project(
+        "proj-1",
+        "Workspace",
+        root_path="/work/workspace",
+        repo="workspace",
+        default_branch="main",
+        color="#0891b2",
+    )
+    handler.store.upsert_worktree(
+        "wt-1",
+        "proj-1",
+        "Agent workspace",
+        path="/work/workspace",
+        branch="agents/change",
+        status="idle",
+        channel_id="ch-1",
+    )
+    handler.store.upsert_plan(
+        "plan-1",
+        "proj-1",
+        "Review workspace changes",
+        worktree_id="wt-1",
+        channel_id="ch-1",
+        status="draft",
+    )
+    agent_channel = SimpleNamespace(
+        harness="codex",
+        model="gpt-5.2",
+        status="active",
+        updated_at="2026-05-18T12:00:00+00:00",
+    )
+    chat_message = SimpleNamespace(
+        id="msg-1",
+        role="assistant",
+        content="Approve shell command?",
+        created_at="2026-05-18T12:01:00+00:00",
+        metadata=json.dumps({
+            "interaction_id": "int-1",
+            "kind": "permission",
+            "options": ["Allow", "Deny"],
+        }),
+    )
+    handler._agent_server = SimpleNamespace(
+        store=SimpleNamespace(
+            get_channel=lambda channel_id: agent_channel,
+            get_chat_history=lambda channel_id: [chat_message],
+            get_activity_history=lambda channel_id: [],
+        ),
+        _complications=None,
+    )
+    handler._agent_spawner = SimpleNamespace(is_running=lambda channel_id: False)
+    sent = _capture(handler)
+
+    await handler._session_mgr._handle_data_frame(
+        _session(),
+        {"frame_type": "data", "payload": _v1_request("req-inbox", "inbox.list")},
+        object(),
+    )
+
+    payload = sent[0]["payload"]
+    assert sent[0]["type"] == "inbox.list"
+    assert payload["schema"] == "inbox.v1"
+    assert payload["items"][0] | {"time": "ignored"} == {
+        "id": "interaction-int-1",
+        "kind": "permission",
+        "priority": "high",
+        "projectId": "proj-1",
+        "projectName": "Workspace",
+        "projectColor": "#0891b2",
+        "worktreeId": "wt-1",
+        "planId": "plan-1",
+        "channelId": "ch-1",
+        "interactionId": "int-1",
+        "title": "Approve shell command?",
+        "detail": "Workspace / Agent workspace",
+        "actor": "gpt-5.2",
+        "time": "ignored",
+        "actions": ["Respond"],
+    }
 
 
 @pytest.mark.asyncio
