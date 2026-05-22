@@ -116,6 +116,27 @@ async def test_worktree_changes_include_untracked(handler: E2EEHandler, repo: Pa
 
 
 @pytest.mark.asyncio
+async def test_untracked_directory_expands_to_individual_files(
+    handler: E2EEHandler, repo: Path,
+):
+    _set_channel_cwd(handler, "ch1", repo.parent)
+    new_dir = repo / "newdir"
+    sub_dir = new_dir / "sub"
+    sub_dir.mkdir(parents=True)
+    (new_dir / "a.txt").write_text("a\n")
+    (new_dir / "b.txt").write_text("b\n")
+    (sub_dir / "c.txt").write_text("c\n")
+
+    await handler._handle_files_changes(_FakeSession(), {
+        "channel_id": "ch1",
+    }, None)
+
+    frame = next(f for f in handler._sent_frames if f["action"] == "files_changes_result")
+    paths = {e["path"] for e in frame["repos"][0]["entries"]}
+    assert paths == {"repo/newdir/a.txt", "repo/newdir/b.txt", "repo/newdir/sub/c.txt"}
+
+
+@pytest.mark.asyncio
 async def test_revision_file_diff(handler: E2EEHandler, repo: Path):
     _set_channel_cwd(handler, "ch1", repo.parent)
     head = _git(repo, "rev-parse", "HEAD")

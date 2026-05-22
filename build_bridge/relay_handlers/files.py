@@ -436,7 +436,10 @@ async def _enrich_files_list_with_git(
 async def _collect_repo_changes(repo: str, cwd: str) -> dict[str, Any] | None:
     """Collect changed files for a single repo (worktree + staged)."""
     results = await asyncio.gather(
-        _run_git(repo, ["status", "--porcelain=v1"]),
+        # --untracked-files=all so each file in a new directory gets its
+        # own entry instead of git collapsing the dir to a single "?? newdir/"
+        # row that the changes view can't drill into.
+        _run_git(repo, ["status", "--porcelain=v1", "--untracked-files=all"]),
         _run_git(repo, ["diff", "--numstat"]),
         _run_git(repo, ["diff", "--cached", "--numstat"]),
         git_remote_name(repo),
