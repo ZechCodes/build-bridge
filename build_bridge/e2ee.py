@@ -175,6 +175,12 @@ class E2EEHandler:
         """Test-compat: delegate to relay_handlers.files.handle_file_diff."""
         await files.handle_file_diff(self._ctx, session, payload, ws)
 
+    async def _handle_chat_image_fetch(
+        self, session: ActiveSession, payload: dict[str, Any], ws: Any,
+    ) -> None:
+        """Test-compat: delegate to relay_handlers.files.handle_chat_image_fetch."""
+        await files.handle_chat_image_fetch(self._ctx, session, payload, ws)
+
     # ------------------------------------------------------------------
     # Frame transport — delegated to E2EESession
     # ------------------------------------------------------------------
@@ -258,6 +264,7 @@ class E2EEHandler:
             proto.FILES_COMMITS:       lambda s, p, ws: files.handle_files_commits(ctx, s, p, ws),
             proto.FILE_READ:           lambda s, p, ws: files.handle_file_read(ctx, s, p, ws),
             proto.FILE_DIFF:           lambda s, p, ws: files.handle_file_diff(ctx, s, p, ws),
+            proto.CHAT_IMAGE_FETCH:    lambda s, p, ws: files.handle_chat_image_fetch(ctx, s, p, ws),
 
             # URL
             proto.URL_FETCH:           lambda s, p, ws: url.handle_url_fetch(ctx, s, p, ws),

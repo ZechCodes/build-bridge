@@ -72,6 +72,7 @@ FILES_CHANGES = "files_changes"
 FILES_COMMITS = "files_commits"
 FILE_READ = "file_read"
 FILE_DIFF = "file_diff"
+CHAT_IMAGE_FETCH = "chat_image_fetch"
 
 # URL
 URL_FETCH = "url_fetch"
@@ -128,6 +129,7 @@ FILES_CHANGES_RESULT = "files_changes_result"
 FILES_COMMITS_RESULT = "files_commits_result"
 FILE_READ_RESULT = "file_read_result"
 FILE_DIFF_RESULT = "file_diff_result"
+CHAT_IMAGE_RESULT = "chat_image_result"
 
 # URL
 URL_FETCH_RESULT = "url_fetch_result"
@@ -571,6 +573,14 @@ def validate_file_diff(payload: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+def validate_chat_image_fetch(payload: dict[str, Any]) -> tuple[bool, str]:
+    if err := _require_str(payload, "channel_id"):
+        return False, err
+    if err := _require_str(payload, "path"):
+        return False, err
+    return True, ""
+
+
 # ---------------------------------------------------------------------------
 # URL (§5.10)
 # ---------------------------------------------------------------------------
@@ -672,6 +682,7 @@ VALIDATORS: dict[str, ValidatorFn] = {
     FILES_COMMITS: validate_files_commits,
     FILE_READ: validate_file_read,
     FILE_DIFF: validate_file_diff,
+    CHAT_IMAGE_FETCH: validate_chat_image_fetch,
     # URL
     URL_FETCH: validate_url_fetch,
     # Uploads

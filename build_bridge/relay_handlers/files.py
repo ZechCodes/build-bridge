@@ -802,6 +802,96 @@ async def handle_file_read(
 
 
 # ---------------------------------------------------------------------------
+# chat_image_fetch — lazy fetch for <build-image> tags in chat messages
+# ---------------------------------------------------------------------------
+
+
+async def handle_chat_image_fetch(
+    ctx: HandlerContext,
+    session: ActiveSession,
+    payload: dict[str, Any],
+    ws: Any,
+) -> None:
+    """Return an image data URI for a `<build-image>` tag in chat.
+
+    The bridge persists chat messages with body-less `<build-image>` tags
+    so chat_messages.content stays small. The dashboard calls this on
+    render to pull the bytes on demand. Mirrors `handle_file_read`'s
+    image branch but keeps the wire action distinct so chat-image
+    requests don't collide with the Files view's single-slot read.
+    """
+    channel_id = payload["channel_id"]  # validator: required
+    rel_path = payload["path"]          # validator: required
+
+    cwd = ctx.get_channel_cwd(channel_id)
+    resolved = ctx.resolve_safe_path(cwd, rel_path)
+    if resolved is None:
+        await ctx.send_frame(session, ws, payload={
+            "action": proto.CHAT_IMAGE_RESULT,
+            "channel_id": channel_id,
+            "path": rel_path,
+            "error": "Path outside working directory",
+        })
+        return
+
+    ext = os.path.splitext(resolved)[1].lower()
+    if ext not in _IMAGE_EXTS:
+        await ctx.send_frame(session, ws, payload={
+            "action": proto.CHAT_IMAGE_RESULT,
+            "channel_id": channel_id,
+            "path": rel_path,
+            "error": "Not an image",
+        })
+        return
+
+    try:
+        stat = os.stat(resolved)
+    except OSError as exc:
+        await ctx.send_frame(session, ws, payload={
+            "action": proto.CHAT_IMAGE_RESULT,
+            "channel_id": channel_id,
+            "path": rel_path,
+            "error": str(exc),
+        })
+        return
+
+    if stat.st_size > _MAX_IMAGE_SIZE:
+        await ctx.send_frame(session, ws, payload={
+            "action": proto.CHAT_IMAGE_RESULT,
+            "channel_id": channel_id,
+            "path": rel_path,
+            "error": "Image too large",
+        })
+        return
+
+    mime = mimetypes.guess_type(str(resolved))[0] or "image/png"
+    try:
+        with open(resolved, "rb") as f:
+            raw = f.read()
+    except OSError as exc:
+        await ctx.send_frame(session, ws, payload={
+            "action": proto.CHAT_IMAGE_RESULT,
+            "channel_id": channel_id,
+            "path": rel_path,
+            "error": str(exc),
+        })
+        return
+
+    data_uri = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+    chunk_size = 500_000  # ~500 KB per chunk to stay under WS frame limits
+    chunks = [data_uri[i:i + chunk_size] for i in range(0, len(data_uri), chunk_size)]
+    for idx, chunk in enumerate(chunks):
+        await ctx.send_frame(session, ws, payload={
+            "action": proto.CHAT_IMAGE_RESULT,
+            "channel_id": channel_id,
+            "path": rel_path,
+            "content": chunk,
+            "chunk_index": idx,
+            "chunk_total": len(chunks),
+        })
+
+
+# ---------------------------------------------------------------------------
 # file_diff
 # ---------------------------------------------------------------------------
 

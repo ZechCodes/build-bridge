@@ -39,6 +39,7 @@ DISPATCHED_ACTIONS = {
     proto.TERMINAL_EXEC, proto.TERMINAL_KILL, proto.TERMINAL_COMPLETE,
     proto.FILES_LIST, proto.FILES_CHANGES, proto.FILES_COMMITS,
     proto.FILE_READ, proto.FILE_DIFF,
+    proto.CHAT_IMAGE_FETCH,
     proto.URL_FETCH,
     proto.UPLOAD_CHUNK, proto.UPLOAD_COMPLETE,
 }
@@ -546,6 +547,22 @@ class TestValidateFileRead:
 
     def test_missing_path(self):
         ok, _ = proto.validate_file_read({"channel_id": "abc"})
+        assert not ok
+
+
+class TestValidateChatImageFetch:
+    def test_valid(self):
+        ok, _ = proto.validate_chat_image_fetch(
+            {"channel_id": "abc", "path": "shot.png"}
+        )
+        assert ok
+
+    def test_missing_channel_id(self):
+        ok, _ = proto.validate_chat_image_fetch({"path": "shot.png"})
+        assert not ok
+
+    def test_missing_path(self):
+        ok, _ = proto.validate_chat_image_fetch({"channel_id": "abc"})
         assert not ok
 
 

@@ -8,7 +8,6 @@ to browser clients via a broadcast callback.
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -727,25 +726,22 @@ class AgentServer:
 
             ext = os.path.splitext(rel_path)[1].lstrip(".").lower()
 
-            # Images: read binary, base64-encode, ship in a <build-image>
-            # tag the frontend can render directly as a data-URI. Line
-            # ranges are meaningless for images — the `start_line`/
-            # `end_line` capture groups are ignored on this branch.
+            # Images: emit a body-less <build-image> tag pointing at the
+            # file on disk. The dashboard fetches the bytes lazily over
+            # the chat_image.fetch wire action, so chat_messages.content
+            # stays small even when the agent references many large
+            # screenshots. We still stat the file under the cap so the
+            # tag only goes out for files the dashboard will actually be
+            # able to fetch later.
             if ext in self._IMAGE_MIME:
                 try:
-                    with open(resolved, "rb") as f:
-                        raw = f.read(self._MAX_IMAGE_EMBED_BYTES + 1)
+                    stat = os.stat(resolved)
                 except OSError:
                     return f"[Could not read: {rel_path}]"
-                if len(raw) > self._MAX_IMAGE_EMBED_BYTES:
+                if stat.st_size > self._MAX_IMAGE_EMBED_BYTES:
                     return f"[Image too large: {rel_path}]"
                 mime = self._IMAGE_MIME[ext]
-                b64 = base64.b64encode(raw).decode("ascii")
-                return (
-                    f'<build-image path="{rel_path}" mime="{mime}">\n'
-                    f"{b64}\n"
-                    f"</build-image>"
-                )
+                return f'<build-image path="{rel_path}" mime="{mime}"></build-image>'
 
             try:
                 with open(resolved, "r", errors="replace") as f:

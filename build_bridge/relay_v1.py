@@ -652,6 +652,7 @@ class V1Protocol:
             v0.FILES_COMMITS: files.handle_files_commits,
             v0.FILE_READ: files.handle_file_read,
             v0.FILE_DIFF: files.handle_file_diff,
+            v0.CHAT_IMAGE_FETCH: files.handle_chat_image_fetch,
             v0.URL_FETCH: url.handle_url_fetch,
             v0.UPLOAD_CHUNK: uploads.handle_upload_chunk,
             v0.UPLOAD_COMPLETE: uploads.handle_upload_complete,

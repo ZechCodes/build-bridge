@@ -1,10 +1,11 @@
 """Unit tests for AgentServer._resolve_file_embeds — the [[file]] /
 [[diff]] marker expansion. Exercises the image branch that returns
-`<build-image>` with base64 content."""
+a body-less `<build-image>` tag pointing at the file on disk; the
+dashboard fetches the bytes lazily via the chat_image.fetch wire
+action."""
 
 from __future__ import annotations
 
-import base64
 from pathlib import Path
 
 import pytest
@@ -59,21 +60,18 @@ async def test_text_file_yields_build_file(server, channel, tmp_path):
     assert "hi there" in out
 
 
-async def test_image_yields_build_image_with_base64(server, channel, tmp_path):
+async def test_image_yields_empty_build_image_tag(server, channel, tmp_path):
     p = tmp_path / "pixel.png"
     p.write_bytes(_TINY_PNG)
     abs_path = str(p)
     out = await server._resolve_file_embeds(channel, f"look: [[file]]({abs_path})")
-    assert "<build-image" in out
-    assert f'path="{abs_path}"' in out
-    assert 'mime="image/png"' in out
-    # Extract the base64 body and confirm it decodes back to the bytes.
-    head = f'<build-image path="{abs_path}" mime="image/png">\n'
-    tail = "\n</build-image>"
-    start = out.index(head) + len(head)
-    end = out.index(tail, start)
-    decoded = base64.b64decode(out[start:end])
-    assert decoded == _TINY_PNG
+    # Body is empty — bytes flow over the dashboard's lazy chat_image
+    # fetch path, not baked into chat_messages.content.
+    assert out == (
+        f"look: <build-image "
+        f'path="{abs_path}" mime="image/png">'
+        f"</build-image>"
+    )
 
 
 async def test_image_extensions_detected(server, channel, tmp_path):
