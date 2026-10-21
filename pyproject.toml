@@ -12,6 +12,7 @@ dependencies = [
     "claude-agent-sdk>=0.1.60",
     "cryptography>=44.0.0",
     "httpx>=0.28.0",
+    "certifi>=2026.10.19",
     "mcp>=1.6.0",
     "watchdog>=6.0.0",
     "websockets>=15.0",
@@ -32,3 +33,6 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.uv]
+required-version = ">=0.13.4"
